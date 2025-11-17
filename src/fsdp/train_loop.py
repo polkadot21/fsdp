@@ -14,6 +14,8 @@ from fsdp.dummy_fsdp import DIYFSDPBlockAB
 from fsdp.model import TinyModel
 from fsdp.profiling_utils import analyze_profiler, print_ascii_gantt
 
+_PRINTED_STEP_ONCE_DEVICE: bool = False
+
 
 class FSDPWrappedModel(torch.nn.Module):
     def __init__(self, cfg: config.BaseSetup, device: torch.device, lr, wd):
@@ -94,14 +96,17 @@ def warmup(cfg: config.BaseSetup, dev: torch.device, model, n_steps: int = 3):
     print(f"===== Warmup complete with {n_steps} steps")
 
 
-def step_once(cfg: config.BaseSetup, dev: torch.device, model):
+def step_once(cfg: config.BaseSetup, dev: torch.device, model) -> float:
+    global _PRINTED_STEP_ONCE_DEVICE
+
     x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
     t0 = time.time()
     out = model(x)
-    # One-time debug
-    if not hasattr(step_once, "_printed_device"):
-        print(f"[step_once] x.device={x.device}, out.device={out.device}")
-        step_once._printed_device = True
+
+    if not _PRINTED_STEP_ONCE_DEVICE:
+        print(f"[step_once] x.device={x.device}, y.device={y.device}, out.device={out.device}")
+        _PRINTED_STEP_ONCE_DEVICE = True
+
     loss = F.mse_loss(out, y)
     loss.backward()
     model.step_all()
