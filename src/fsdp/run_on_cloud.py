@@ -73,7 +73,7 @@ def run_on_cloud() -> None:
         print("Spawning distributed workers...")
         mp.spawn(
             _worker,
-            args=(world_size, cfg.cloud),
+            args=(world_size, cfg),
             nprocs=world_size,
             join=True,
         )
