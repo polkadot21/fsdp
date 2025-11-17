@@ -105,10 +105,12 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
     if rank == 0:
         print(f"[rank{rank}] avg step: {t*1e3:.1f} ms  (world={world})")
 
-    # Profiler trace per rank
     print("Starting profiling")
     os.makedirs(logdir, exist_ok=True)
     trace_path = os.path.join(logdir, f"trace_rank{rank}.json")
+
+    barrier()
+
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
         if dev.type == consts.Device.CUDA
@@ -117,10 +119,18 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
         profile_memory=True,
         with_stack=False,
     ) as prof:
+        # ensure profiler starts after all ranks enter it
+        barrier()
+
         for _ in range(profile_steps):
             with record_function(f"TRAIN_STEP/rank{rank}"):
                 step_once(cfg, dev, model)
 
+        # ensure everything is completed before profiler closes
+        if dev.type == consts.Device.CUDA:
+            torch.cuda.synchronize()
+
+        barrier()
     prof.export_chrome_trace(trace_path)
     if rank == 0:
         print(f"Saved trace: {trace_path}")
