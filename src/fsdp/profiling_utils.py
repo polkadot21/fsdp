@@ -17,10 +17,12 @@ def analyze_profiler(prof, rank):
     for evt in events:
         name = evt.key.lower()
 
+        cuda_time = getattr(evt, "self_cuda_time_total", 0.0)
+
         if any(op in name for op in comm_ops):
-            comm_time += evt.self_cuda_time_total
+            comm_time += cuda_time
         elif any(op in name for op in compute_ops):
-            compute_time += evt.self_cuda_time_total
+            compute_time += cuda_time
 
     # Convert µs → ms
     compute_ms = compute_time / 1000.0
@@ -43,6 +45,7 @@ def analyze_profiler(prof, rank):
 
     print("\nBreakdown of top comm kernels:")
     comm_events = [e for e in events if any(op in e.key.lower() for op in comm_ops)]
+
     comm_events = sorted(comm_events, key=lambda e: e.self_cuda_time_total, reverse=True)
     for e in comm_events[:5]:
         print(f"  {e.key:30s} {e.self_cuda_time_total/1000.0:8.2f} ms")
@@ -68,10 +71,12 @@ def print_ascii_gantt(prof, rank, width=60):
     for e in events:
         name = e.key.lower()
 
+        cuda_time = getattr(e, "self_cuda_time_total", 0.0)
+
         if any(op in name for op in compute_ops):
-            compute_us += e.self_cuda_time_total
+            compute_us += cuda_time
         elif any(op in name for op in comm_ops):
-            comm_us += e.self_cuda_time_total
+            comm_us += cuda_time
 
     compute_ms = compute_us / 1000
     comm_ms = comm_us / 1000
