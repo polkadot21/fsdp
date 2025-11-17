@@ -95,7 +95,9 @@ def step_once(cfg: config.BaseSetup, dev: torch.device, model):
 
 
 def train_one_rank(
-    data_cfg: config.BaseSetup, logdir: str = "logs", profile_steps: int = 8
+    data_cfg: config.BaseSetup,
+    logdir: str = "logs",
+    profile_steps: int = 8,
 ) -> None:
     rank, world = world_info()
     dev = (
@@ -116,12 +118,11 @@ def train_one_rank(
     os.makedirs(logdir, exist_ok=True)
     trace_path = os.path.join(logdir, f"trace_rank{rank}.json")
 
+    # All ranks enter profiling at the same time
     barrier()
 
     with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
-        if dev.type == consts.Device.CUDA
-        else [ProfilerActivity.CPU],
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         record_shapes=False,
         profile_memory=True,
         with_stack=False,
@@ -129,8 +130,8 @@ def train_one_rank(
         # ensure profiler starts after all ranks enter it
         barrier()
 
-        for _ in range(profile_steps):
-            with record_function(f"TRAIN_STEP/rank{rank}"):
+        for i in range(profile_steps):
+            with record_function(f"TRAIN_STEP/rank{rank}/step{i}"):
                 step_once(data_cfg, dev, model)
 
         # ensure everything is completed before profiler closes
@@ -139,7 +140,6 @@ def train_one_rank(
 
         barrier()
 
-    # Store profiling
     prof.export_chrome_trace(trace_path)
     analyze_profiler(prof, rank)
     print_ascii_gantt(prof, rank)
