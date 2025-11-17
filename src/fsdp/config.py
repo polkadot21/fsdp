@@ -1,0 +1,84 @@
+import functools
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+class BaseSetup(BaseSettings):
+    """
+    Common fields for any training configuration.
+    """
+
+    in_dim: int = Field(..., description="Input embedding dimension")
+    dim: int = Field(..., description="Model hidden size")
+    n_heads: int = Field(..., description="Number of attention heads")
+    ff_dim: int = Field(..., description="Feed-forward inner dimension")
+    n_layers: int = Field(..., description="Number of Transformer blocks")
+    batch: int = Field(..., description="Batch size per rank")
+    T: int = Field(..., description="Sequence length")
+    steps: int = Field(..., description="Steps per validation epoch")
+    lr: float = Field(..., description="Learning rate")
+    wd: float = Field(..., description="Weight decay")
+
+    class Config:
+        extra = "ignore"
+
+
+class CPUSetup(BaseSetup):
+    """
+    Small config for CPU or single-GPU debugging.
+    """
+
+    in_dim: int = 128
+    dim: int = 256
+    n_heads: int = 8
+    ff_dim: int = 1024
+    n_layers: int = 4
+    batch: int = 4
+    T: int = 64
+    steps: int = 50
+    lr: float = 1e-3
+    wd: float = 0.0
+
+
+class CloudSetup(BaseSetup):
+    """
+    'Fat' configuration which makes communication heavy enough
+    to expose compute/comm overlap on multi-GPU A100/H100.
+    """
+
+    in_dim: int = 2048
+    dim: int = 4096
+    n_heads: int = 32
+    ff_dim: int = 16384
+    n_layers: int = 8
+    batch: int = 4
+    T: int = 256
+    steps: int = 100
+    lr: float = 1e-3
+    wd: float = 0.0
+
+
+# -----------------------------
+#       Unified Config
+# -----------------------------
+class Config(BaseSettings):
+    """
+    Top-level unified config object.
+    Access like cfg.cpu or cfg.cloud.
+    """
+
+    cpu: CPUSetup = CPUSetup()
+    cloud: CloudSetup = CloudSetup()
+
+    class Config:
+        extra = "ignore"
+
+
+@functools.lru_cache
+def get_cfg() -> Config:
+    """
+    Cached singleton config instance.
+    Imported everywhere to avoid reallocation.
+    """
+    return Config()

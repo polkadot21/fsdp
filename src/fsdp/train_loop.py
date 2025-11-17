@@ -94,7 +94,7 @@ def step_once(cfg, dev, model):
     return time.time() - t0
 
 
-def train_one_rank(cfg, logdir="logs", profile_steps=8):
+def train_one_rank(data_cfg, logdir="logs", profile_steps=8):
     rank, world = world_info()
     dev = (
         torch.device(consts.Device.CUDA, rank)
@@ -102,11 +102,11 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
         else torch.device(consts.Device.CPU)
     )
 
-    model = FSDPWrappedModel(cfg, device=dev, lr=cfg["lr"], wd=cfg["wd"]).to(dev)
+    model = FSDPWrappedModel(data_cfg, device=dev, lr=data_cfg["lr"], wd=data_cfg["wd"]).to(dev)
 
-    warmup(cfg, dev, model)
+    warmup(data_cfg, dev, model)
     # Simple runtime printout
-    t = sum(step_once(cfg, dev, model) for _ in range(10)) / 10
+    t = sum(step_once(data_cfg, dev, model) for _ in range(10)) / 10
     if rank == 0:
         print(f"[rank{rank}] avg step: {t*1e3:.1f} ms  (world={world})")
 
@@ -129,7 +129,7 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
 
         for _ in range(profile_steps):
             with record_function(f"TRAIN_STEP/rank{rank}"):
-                step_once(cfg, dev, model)
+                step_once(data_cfg, dev, model)
 
         # ensure everything is completed before profiler closes
         if dev.type == consts.Device.CUDA:
@@ -148,8 +148,8 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
     print("Short training loop to verify learning")
     for epoch in range(1, 3):
         losses = []
-        for _ in range(cfg["steps"]):
-            x, y = make_batch(cfg["batch"], cfg["T"], cfg["in_dim"], dev)
+        for _ in range(data_cfg["steps"]):
+            x, y = make_batch(data_cfg["batch"], data_cfg["T"], data_cfg["in_dim"], dev)
             out = model(x)
             loss = F.mse_loss(out, y)
             loss.backward()

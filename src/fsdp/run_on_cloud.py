@@ -3,12 +3,12 @@ import os
 import torch
 import torch.multiprocessing as mp
 
-from fsdp.data import cloud_cfg, cpu_cfg
+from fsdp.config import get_cfg
 from fsdp.dist_utils import ddp_cleanup, ddp_init
 from fsdp.train_loop import train_one_rank
 
 
-def _worker(rank, world_size, cfg, logdir):
+def _worker(rank, world_size, data_cfg, logdir):
     """
     Child worker. Must set rank-specific env vars **before** ddp_init().
     """
@@ -24,12 +24,17 @@ def _worker(rank, world_size, cfg, logdir):
     print(f"[worker {rank}] CUDA={use_cuda} backend={backend}")
 
     try:
-        train_one_rank(cfg, logdir=logdir, profile_steps=8)
+        train_one_rank(data_cfg, logdir=logdir, profile_steps=8)
     finally:
         ddp_cleanup()
 
 
-def run_on_cloud(world_size=None, fat=True, logdir="logs"):
+def run_on_cloud(
+    world_size=None,
+    logdir: str = "logs",
+    *,
+    on_cloud: bool = True,
+):
     """
     Jupyter-friendly:
     - Auto-select world_size based on available GPUs
@@ -41,7 +46,8 @@ def run_on_cloud(world_size=None, fat=True, logdir="logs"):
     print(f"=== Running with world size: {world_size} =====")
 
     # Decide runtime config (fat transformer layers vs small CPU config)
-    cfg = cloud_cfg() if fat else cpu_cfg()
+    cfg = get_cfg()
+    data_cfg = cfg.cloud if on_cloud else cfg.cpu
 
     # Detect world size if user didn't set it
     if world_size is None:
@@ -67,7 +73,7 @@ def run_on_cloud(world_size=None, fat=True, logdir="logs"):
         print("Spawning distributed workers...")
         mp.spawn(
             _worker,
-            args=(world_size, cfg, logdir),
+            args=(world_size, data_cfg, logdir),
             nprocs=world_size,
             join=True,
         )
