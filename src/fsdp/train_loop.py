@@ -20,6 +20,8 @@ class FSDPWrappedModel(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.dev = device
+        print(f"[FSDPWrappedModel] constructing on device={device}")
+
         m = TinyModel(
             cfg.in_dim,
             cfg.dim,
@@ -27,6 +29,8 @@ class FSDPWrappedModel(torch.nn.Module):
             cfg.ff_dim,
             cfg.n_layers,
         ).to(device)
+
+        print(f"[FSDPWrappedModel] TinyModel.inp.weight.device={m.inp.weight.device}")
 
         dummy_blocks = []
         sizes = []
@@ -45,6 +49,11 @@ class FSDPWrappedModel(torch.nn.Module):
                 for i, blk in enumerate(dummy_blocks)
             ]
         )
+        print(
+            f"[FSDPWrappedModel] real block 0 first_param_device="
+            f"{next(self.blocks[0].mod.parameters()).device}"
+        )
+
         self.out = m.out
 
     def forward(self, x: torch.Tensor):
@@ -71,14 +80,17 @@ class FSDPWrappedModel(torch.nn.Module):
 
 
 def warmup(cfg: config.BaseSetup, dev: torch.device, model, n_steps: int = 3):
-    for _ in range(n_steps):
+    print(f"[warmup] running on device={dev}")
+    for step in range(n_steps):
         x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
         out = model(x)
+        if step == 0:
+            print(f"[warmup] x.device={x.device}, y.device={y.device}, out.device={out.device}")
         loss = F.mse_loss(out, y)
         loss.backward()
         model.step_all()
-        torch.cuda.synchronize() if dev.type == consts.Device.CUDA else None
-
+        if dev.type == consts.Device.CUDA:
+            torch.cuda.synchronize()
     print(f"===== Warmup complete with {n_steps} steps")
 
 
@@ -86,6 +98,10 @@ def step_once(cfg: config.BaseSetup, dev: torch.device, model):
     x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
     t0 = time.time()
     out = model(x)
+    # One-time debug
+    if not hasattr(step_once, "_printed_device"):
+        print(f"[step_once] x.device={x.device}, out.device={out.device}")
+        step_once._printed_device = True
     loss = F.mse_loss(out, y)
     loss.backward()
     model.step_all()
@@ -105,8 +121,13 @@ def train_one_rank(
         if torch.cuda.is_available()
         else torch.device(consts.Device.CPU)
     )
+    print(
+        f"[train_one_rank] rank={rank} world={world} dev={dev} "
+        f"cuda_available={torch.cuda.is_available()}"
+    )
 
     model = FSDPWrappedModel(data_cfg, device=dev, lr=data_cfg.lr, wd=data_cfg.wd).to(dev)
+    print(f"[train_one_rank] rank={rank} first_param_device=" f"{next(model.parameters()).device}")
 
     warmup(data_cfg, dev, model)
     # Simple runtime printout

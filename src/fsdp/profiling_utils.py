@@ -1,68 +1,49 @@
 def analyze_profiler(prof, rank: int) -> None:
-    """
-    Summarize compute vs comm vs overlap from a torch.profiler.Profile.
-    """
-
-    print(f"\n=== PROFILER SUMMARY (rank={rank}) ===")
-
     events = prof.key_averages(group_by_input_shape=False)
-
-    compute_time_us = 0.0
-    comm_time_us = 0.0
-    any_cuda = False
 
     compute_ops = ("mm", "addmm", "gelu", "relu", "matmul", "softmax")
     comm_ops = ("all_gather", "reduce_scatter", "all_reduce")
 
+    compute_us = comm_us = 0.0
+    compute_cpu_us = comm_cpu_us = 0.0
+    any_cuda = False
+
     for evt in events:
         name = evt.key.lower()
 
+        cuda_time = 0.0
         if hasattr(evt, "cuda_time_total"):
             cuda_time = evt.cuda_time_total
-        else:
-            cuda_time = getattr(evt, "self_cuda_time_total", 0.0)
+        elif hasattr(evt, "self_cuda_time_total"):
+            cuda_time = evt.self_cuda_time_total
+
+        cpu_time = getattr(evt, "self_cpu_time_total", 0.0)
 
         if cuda_time > 0:
             any_cuda = True
-        if any(op in name for op in comm_ops):
-            comm_time_us += cuda_time
-        elif any(op in name for op in compute_ops):
-            compute_time_us += cuda_time
-    if not any_cuda:
-        print(
-            "No CUDA activity recorded. Are you sure the model ran on GPU "
-            "and ProfilerActivity.CUDA is enabled?"
-        )
-        print("=== END SUMMARY ===\n")
-        return
 
-    # Convert µs → ms
-    compute_ms = compute_time_us / 1000.0
-    comm_ms = comm_time_us / 1000.0
+        if any(op in name for op in compute_ops):
+            compute_us += cuda_time
+            compute_cpu_us += cpu_time
+        elif any(op in name for op in comm_ops):
+            comm_us += cuda_time
+            comm_cpu_us += cpu_time
+
+    print(f"\n=== PROFILER SUMMARY (rank={rank}) ===")
+
+    if not any_cuda:
+        print("No CUDA activity recorded (possibly CUPTI disabled). " "Showing CPU times instead.")
+        compute_ms = compute_cpu_us / 1000.0
+        comm_ms = comm_cpu_us / 1000.0
+    else:
+        compute_ms = compute_us / 1000.0
+        comm_ms = comm_us / 1000.0
+
     total_ms = compute_ms + comm_ms
 
-    print(f"Compute time (CUDA):     {compute_ms:8.2f} ms")
-    print(f"Comm time (NCCL):        {comm_ms:8.2f} ms")
+    print(f"Compute time:            {compute_ms:8.2f} ms")
+    print(f"Comm time (NCCL-ish):    {comm_ms:8.2f} ms")
     print(f"Total (compute+comm):    {total_ms:8.2f} ms")
-    hidden_comm = min(compute_ms, comm_ms)
-    visible_comm = max(0.0, comm_ms - compute_ms)
-    overlap_ratio = 100.0 * (hidden_comm / comm_ms) if comm_ms > 0 else 0.0
-
-    print(f"\nHidden communication:    {hidden_comm:8.2f} ms")
-    print(f"Visible communication:   {visible_comm:8.2f} ms")
-    print(f"Overlap ratio:           {overlap_ratio:8.1f}%")
-
-    print("\nBreakdown of top comm kernels:")
-    comm_events = [e for e in events if any(op in e.key.lower() for op in comm_ops)]
-    comm_events = sorted(
-        comm_events,
-        key=lambda e: getattr(e, "cuda_time_total", getattr(e, "self_cuda_time_total", 0.0)),
-        reverse=True,
-    )
-    for e in comm_events[:5]:
-        ct = getattr(e, "cuda_time_total", getattr(e, "self_cuda_time_total", 0.0)) / 1000.0
-        print(f"  {e.key:30s} {ct:8.2f} ms")
-
     print("=== END SUMMARY ===\n")
 
 

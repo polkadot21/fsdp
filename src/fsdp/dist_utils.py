@@ -7,9 +7,14 @@ from fsdp import consts
 def ddp_init(rank: int, world_size: int) -> tuple[bool, consts.DdpBackend]:
     use_cuda = torch.cuda.is_available()
     backend = consts.DdpBackend.NCCL if use_cuda and world_size > 1 else consts.DdpBackend.GLOO
+
     if world_size > 1:
         if use_cuda:
             torch.cuda.set_device(rank)
+            print(
+                f"[ddp_init] rank={rank} set_device({rank}), "
+                f"current_device={torch.cuda.current_device()}"
+            )
         dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     return use_cuda, backend
 

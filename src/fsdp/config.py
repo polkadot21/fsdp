@@ -59,6 +59,10 @@ class CloudSetup(BaseSetup):
     wd: float = 0.0
 
 
+class Logs(BaseSettings):
+    dir: str = "logs"
+
+
 # -----------------------------
 #       Unified Config
 # -----------------------------
@@ -70,6 +74,7 @@ class Config(BaseSettings):
 
     cpu: CPUSetup = CPUSetup()
     cloud: CloudSetup = CloudSetup()
+    logs: Logs = Logs()
 
     class Config:
         extra = "ignore"

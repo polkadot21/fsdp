@@ -35,6 +35,10 @@ class DIYFSDPBlockAB(nn.Module):
         self.rank, self.world = world_info()
         self.dev = device
         self.mod.to(self.dev)
+        print(
+            f"[DIYFSDPBlockAB] rank={self.rank} block_idx={block_idx} "
+            f"mod_first_param_device={next(self.mod.parameters()).device}"
+        )
 
         named = [(n, p) for n, p in self.mod.named_parameters(recurse=True) if p.requires_grad]
         named.sort(key=lambda x: x[0])
