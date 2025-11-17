@@ -159,17 +159,22 @@ class DIYFSDPBlockAB(nn.Module):
             self._rs_work = None
         else:
             self._grad_shard = torch.empty_like(self.shard, dtype=g_full.dtype)
+            input_flat = self._grad_buf
+
             if self.rs_stream is None:
-                in_chunks = list(self._grad_buf.chunk(self.world, 0))
+                # Synchronous path
                 dist.reduce_scatter_tensor(
-                    self._grad_shard, in_chunks, op=dist.ReduceOp.SUM, async_op=False
+                    self._grad_shard,
+                    input_flat,
+                    op=dist.ReduceOp.SUM,
                 )
                 self._rs_work = None
+
             else:
+                # Asynchronous reduce-scatter on dedicated CUDA stream
                 with torch.cuda.stream(self.rs_stream):
-                    in_chunks = list(self._grad_buf.chunk(self.world, 0))
                     self._rs_work = dist.reduce_scatter_tensor(
-                        self._grad_shard, in_chunks, op=dist.ReduceOp.SUM, async_op=True
+                        self._grad_shard, input_flat, op=dist.ReduceOp.SUM, async_op=True
                     )
 
     @torch.no_grad()
