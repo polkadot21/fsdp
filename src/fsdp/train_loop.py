@@ -6,7 +6,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from fsdp import consts
+from fsdp import config, consts
 from fsdp.buffer_pool import TwoBufferPool
 from fsdp.data import make_batch
 from fsdp.dist_utils import barrier, world_info
@@ -16,16 +16,16 @@ from fsdp.profiling_utils import analyze_profiler, print_ascii_gantt
 
 
 class FSDPWrappedModel(torch.nn.Module):
-    def __init__(self, cfg, device, lr, wd):
+    def __init__(self, cfg: config.BaseSetup, device: torch.device, lr, wd):
         super().__init__()
         self.cfg = cfg
         self.dev = device
         m = TinyModel(
-            cfg["in_dim"],
-            cfg["dim"],
-            cfg["n_heads"],
-            cfg["ff_dim"],
-            cfg["n_layers"],
+            cfg.in_dim,
+            cfg.dim,
+            cfg.n_heads,
+            cfg.ff_dim,
+            cfg.n_layers,
         ).to(device)
 
         dummy_blocks = []
@@ -47,7 +47,7 @@ class FSDPWrappedModel(torch.nn.Module):
         )
         self.out = m.out
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         # schedule: prefetch block0, then loop blocks
         self.blocks[0].prefetch_params_async()
         self.blocks[0].materialize_params()
@@ -70,9 +70,9 @@ class FSDPWrappedModel(torch.nn.Module):
         return ok
 
 
-def warmup(cfg, dev, model, n_steps: int = 3):
+def warmup(cfg: config.BaseSetup, dev: torch.device, model, n_steps: int = 3):
     for _ in range(n_steps):
-        x, y = make_batch(cfg["batch"], cfg["T"], cfg["in_dim"], dev)
+        x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
         out = model(x)
         loss = F.mse_loss(out, y)
         loss.backward()
@@ -82,8 +82,8 @@ def warmup(cfg, dev, model, n_steps: int = 3):
     print(f"===== Warmup complete with {n_steps} steps")
 
 
-def step_once(cfg, dev, model):
-    x, y = make_batch(cfg["batch"], cfg["T"], cfg["in_dim"], dev)
+def step_once(cfg: config.BaseSetup, dev: torch.device, model):
+    x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
     t0 = time.time()
     out = model(x)
     loss = F.mse_loss(out, y)
@@ -94,7 +94,9 @@ def step_once(cfg, dev, model):
     return time.time() - t0
 
 
-def train_one_rank(data_cfg, logdir="logs", profile_steps=8):
+def train_one_rank(
+    data_cfg: config.BaseSetup, logdir: str = "logs", profile_steps: int = 8
+) -> None:
     rank, world = world_info()
     dev = (
         torch.device(consts.Device.CUDA, rank)
@@ -102,7 +104,7 @@ def train_one_rank(data_cfg, logdir="logs", profile_steps=8):
         else torch.device(consts.Device.CPU)
     )
 
-    model = FSDPWrappedModel(data_cfg, device=dev, lr=data_cfg["lr"], wd=data_cfg["wd"]).to(dev)
+    model = FSDPWrappedModel(data_cfg, device=dev, lr=data_cfg.lr, wd=data_cfg.wd).to(dev)
 
     warmup(data_cfg, dev, model)
     # Simple runtime printout
@@ -148,8 +150,8 @@ def train_one_rank(data_cfg, logdir="logs", profile_steps=8):
     print("Short training loop to verify learning")
     for epoch in range(1, 3):
         losses = []
-        for _ in range(data_cfg["steps"]):
-            x, y = make_batch(data_cfg["batch"], data_cfg["T"], data_cfg["in_dim"], dev)
+        for _ in range(data_cfg.steps):
+            x, y = make_batch(data_cfg.batch, data_cfg.T, data_cfg.in_dim, dev)
             out = model(x)
             loss = F.mse_loss(out, y)
             loss.backward()
