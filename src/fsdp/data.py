@@ -1,7 +1,7 @@
 import torch
 
 
-def make_batch(batch_size, T, D, device):
+def make_batch(batch_size: int, T, D, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     x = torch.randn(batch_size, T, D, device=device)
     y = x.clone()
     return x, y
@@ -22,7 +22,7 @@ def cpu_cfg():
     )
 
 
-def cloud_cfg():  # "fat" to make comm/compute meaningful on A100
+def cloud_cfg():  # "fat" to make comm/compute meaningful on H100
     return dict(
         in_dim=2048,
         dim=4096,

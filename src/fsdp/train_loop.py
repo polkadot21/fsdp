@@ -12,6 +12,7 @@ from fsdp.data import make_batch
 from fsdp.dist_utils import barrier, world_info
 from fsdp.dummy_fsdp import DIYFSDPBlockAB
 from fsdp.model import TinyModel
+from fsdp.profiling_utils import analyze_profiler, print_ascii_gantt
 
 
 class FSDPWrappedModel(torch.nn.Module):
@@ -19,9 +20,13 @@ class FSDPWrappedModel(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.dev = device
-        m = TinyModel(cfg["in_dim"], cfg["dim"], cfg["n_heads"], cfg["ff_dim"], cfg["n_layers"]).to(
-            device
-        )
+        m = TinyModel(
+            cfg["in_dim"],
+            cfg["dim"],
+            cfg["n_heads"],
+            cfg["ff_dim"],
+            cfg["n_layers"],
+        ).to(device)
 
         dummy_blocks = []
         sizes = []
@@ -131,7 +136,12 @@ def train_one_rank(cfg, logdir="logs", profile_steps=8):
             torch.cuda.synchronize()
 
         barrier()
+
+    # Store profiling
     prof.export_chrome_trace(trace_path)
+    analyze_profiler(prof, rank)
+    print_ascii_gantt(prof, rank)
+
     if rank == 0:
         print(f"Saved trace: {trace_path}")
 

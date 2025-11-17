@@ -11,7 +11,7 @@ class TwoBufferPool:
     so two buffers suffice and bound peak memory.
     """
 
-    def __init__(self, max_full_numel: int, device: torch.device, dtype=torch.float32):
+    def __init__(self, max_full_numel: int, device: torch.device, dtype=torch.float32) -> None:
         self.device = device
         self.dtype = dtype
         self.maxn = max_full_numel
