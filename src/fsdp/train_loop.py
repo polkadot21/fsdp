@@ -49,18 +49,41 @@ class FSDPWrappedModel(torch.nn.Module):
         dummy_blocks = []
         sizes = []
         for i, blk in enumerate(m.blocks):
-            wrap = DIYFSDPBlockAB(device, blk, block_idx=i, bufpool=None, lr=lr, wd=wd)
+            wrap = DIYFSDPBlockAB(
+                device,
+                blk,
+                block_idx=i,
+                bufpool=None,
+                lr=lr,
+                wd=wd,
+                register_backward_hook=False,
+            )
             sizes.append(wrap.shard_size * (dist.get_world_size() if dist.is_initialized() else 1))
             dummy_blocks.append(wrap)
 
-        max_full = max(sizes)
-        bufpool = TwoBufferPool(max_full, device=torch.device(device), dtype=torch.float32)
-        print(f"Constructed buffers with size: {max_full}")
+        bufpool = TwoBufferPool.from_block_full_sizes(
+            sizes,
+            device=torch.device(device),
+            dtype=torch.float32,
+        )
+        print(
+            "Constructed buffers: "
+            f"even_total={bufpool.buf_even.numel() if bufpool.buf_even is not None else 0}, "
+            f"odd_total={bufpool.buf_odd.numel() if bufpool.buf_odd is not None else 0}"
+        )
 
         self.inp = m.inp
         self.blocks = torch.nn.ModuleList(
             [
-                DIYFSDPBlockAB(device, blk.mod, block_idx=i, bufpool=bufpool, lr=lr, wd=wd)
+                DIYFSDPBlockAB(
+                    device,
+                    blk.mod,
+                    block_idx=i,
+                    bufpool=bufpool,
+                    lr=lr,
+                    wd=wd,
+                    register_backward_hook=True,
+                )
                 for i, blk in enumerate(dummy_blocks)
             ]
         )

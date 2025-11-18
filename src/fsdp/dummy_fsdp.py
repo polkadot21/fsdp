@@ -22,11 +22,13 @@ class DIYFSDPBlockAB(nn.Module):
         device: torch.device,
         module: nn.Module,
         block_idx: int,
-        bufpool: TwoBufferPool,
+        bufpool: TwoBufferPool | None,
         lr=1e-3,
         wd=0.0,
         dtype_full=torch.float32,
-    ):
+        *,
+        register_backward_hook: bool,
+    ) -> None:
         super().__init__()
         self.mod = module
         self.block_idx = block_idx
@@ -85,7 +87,8 @@ class DIYFSDPBlockAB(nn.Module):
         self._views_full = None  # keeps full buffer alive while views exist
 
         # Hook to start RS asap
-        self.mod.register_full_backward_hook(self._post_backward_hook)
+        if register_backward_hook:
+            self.mod.register_full_backward_hook(self._post_backward_hook)
 
     # ---------- collectives ----------
     @torch.no_grad()
