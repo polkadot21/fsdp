@@ -12,16 +12,18 @@ authors = [{ name = "Your Name" }]
 requires-python = ">=3.10"
 
 dependencies = [
-  "torch>=2.3.0",
+  "torch>=2.8.3",
   "numpy>=1.24",
   "tqdm>=4.66",
   "rich>=13.7",
   "pydantic>=2.12.4",
   "pydantic-settings>=2.12.0",
-  "flash-attn>=2.8.3",
 ]
 
 [project.optional-dependencies]
+flash = [
+    "flash-attn==2.8.3",
+]
 dev = [
   "ruff>=0.5.0",
   "black>=24.3.0",
@@ -33,6 +35,11 @@ profiling = [
   "tensorboard>=2.13",
 ]
 
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+version = "2.8.3"
+requires-dist = ["torch", "einops"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/fsdp"]
 
@@ -40,7 +47,7 @@ packages = ["src/fsdp"]
 packages = ["src/fsdp"]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = ["torch"]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
 
 [tool.ruff]
 line-length = 100
