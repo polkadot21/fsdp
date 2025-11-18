@@ -128,7 +128,7 @@ class DIYFSDPBlockAB(nn.Module):
         off = 0
         for p, n in zip(self.params, self.numels, strict=False):
             v = usable.narrow(0, off, n).view(p.shape)
-            p.data = v.view_as(p).to(self.dtype_full)
+            p.data = v.view_as(p)
             off += n
         self._views_full = flat_full
 
