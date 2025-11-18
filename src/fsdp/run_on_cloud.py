@@ -9,7 +9,7 @@ from fsdp.dist_utils import ddp_cleanup, ddp_init
 from fsdp.train_loop import train_one_rank
 
 
-def _worker(rank: int, world_size: int, cfg: Config, *, sync_mode: bool) -> None:
+def _worker(rank: int, world_size: int, cfg: Config, sync_mode: bool) -> None:
     """
     Child worker. Must set rank-specific env vars **before** ddp_init().
     """
@@ -61,10 +61,11 @@ def run_on_cloud() -> None:
     # ------------------------------------------------------------------
     # Multi-GPU case
     # ------------------------------------------------------------------
+    print("Spawning distributed workers...")
     print("\n##### Running SYNC baseline (no overlap) #####\n")
     mp.spawn(_worker, args=(world_size, cfg, True), nprocs=world_size)
 
     print("\n##### Running ASYNC overlapped FSDP #####\n")
     mp.spawn(_worker, args=(world_size, cfg, False), nprocs=world_size)
 
-    print("\n============= All experiments completed successfully. =============\n")
+    print("Experiments complete!")
