@@ -216,3 +216,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 logs_cpu
+logs_async
+logs_sync

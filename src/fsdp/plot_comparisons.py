@@ -31,9 +31,31 @@ def _etype(evt_name):
     return "comp"
 
 
+def _parse_stream_id(tid):
+    """
+    Convert Chrome trace 'tid' field into an integer stream id.
+
+    Examples:
+      tid = "stream 7"   -> 7
+      tid = "7"          -> 7
+      tid = 7            -> 7
+      tid = "nccl:7"     -> 7
+      anything else      -> 0
+    """
+    if isinstance(tid, int):
+        return tid
+    if isinstance(tid, str):
+        # look for a number in the string, from right to left
+        for tok in reversed(tid.replace(":", " ").split()):
+            if tok.isdigit():
+                return int(tok)
+    # fallback
+    return 0
+
+
 def _group_by_stream(events):
     """
-    Returns: dict: stream_id → list of (type, start_ms, end_ms)
+    Returns: dict[stream_id -> list of (type, start_ms, end_ms)]
     """
     streams = defaultdict(list)
 
@@ -46,14 +68,16 @@ def _group_by_stream(events):
         dur = dur_us / 1000.0
         t = _etype(e["name"])
 
-        stream = e.get("tid", 0)  # Chrome trace stores CUDA stream in 'tid'
+        stream_id = _parse_stream_id(e.get("tid", 0))
+        streams[stream_id].append((t, ts, ts + dur))
 
-        streams[stream].append((t, ts, ts + dur))
+    if not streams:
+        return {}
 
-    # Normalize timeline so first op starts at 0
+    # Normalize time so that the first event across all streams starts at 0.
     t0 = min(min(s for _, s, _ in evts) for evts in streams.values())
-    for s in streams:
-        streams[s] = [(t, st - t0, en - t0) for t, st, en in streams[s]]
+    for sid in streams:
+        streams[sid] = [(t, s - t0, e - t0) for t, s, e in streams[sid]]
 
     return streams
 
@@ -81,14 +105,16 @@ def _draw_stream(ax, evts, label, total_ms):
 
 def _pick_streams(streams):
     """
-    Heuristic: Compute is always the *lowest-numbered CUDA stream*.
-    NCCL comm streams have large tid.
+    Heuristic:
+      - Compute stream is the *lowest* stream id.
+      - Remaining streams are "comm" streams (RS/AG mixed).
     """
-    stream_ids = sorted(streams.keys())
+    if not streams:
+        return 0, []
 
-    compute = stream_ids[0]  # usually stream 7 or 13 for NCCL
-    comm = [s for s in stream_ids[1:]]
-
+    stream_ids = sorted(int(k) for k in streams.keys())
+    compute = stream_ids[0]
+    comm = stream_ids[1:]
     return compute, comm
 
 
