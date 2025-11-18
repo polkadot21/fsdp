@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 try:
-    from flash_attn import flash_attn_varlen_qkvpacked_func  # ignore
+    from flash_attn import flash_attn_varlen_qkvpacked_func  # type: ignore
 except ImportError as e:
     raise ImportError(
         "flash-attn is not installed. Install with `pip install flash-attn` "

@@ -50,6 +50,7 @@ class FSDPWrappedModel(torch.nn.Module):
         sizes = []
         for i, blk in enumerate(m.blocks):
             wrap = DIYFSDPBlockAB(
+                cfg,
                 device,
                 blk,
                 block_idx=i,
@@ -76,6 +77,7 @@ class FSDPWrappedModel(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(
             [
                 DIYFSDPBlockAB(
+                    cfg,
                     device,
                     blk.mod,
                     block_idx=i,

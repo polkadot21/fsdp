@@ -22,6 +22,8 @@ class BaseSetup(BaseSettings):
     lr: float = Field(..., description="Learning rate")
     wd: float = Field(..., description="Weight decay")
 
+    sync_collectives: bool = Field(False, description="Disable overlap: run AG/RS synchronously")
+
     class Config:
         extra = "ignore"
 

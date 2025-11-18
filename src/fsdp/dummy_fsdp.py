@@ -2,7 +2,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from fsdp import consts
+from fsdp import config, consts
 from fsdp.buffer_pool import TwoBufferPool
 from fsdp.dist_utils import world_info
 
@@ -19,6 +19,7 @@ class DIYFSDPBlockAB(nn.Module):
 
     def __init__(
         self,
+        cfg: config.BaseSetup,
         device: torch.device,
         module: nn.Module,
         block_idx: int,
@@ -53,21 +54,16 @@ class DIYFSDPBlockAB(nn.Module):
         self.pad = pad
         self.shard_size = (tot + pad) // self.world
 
-        if self.world == 1:
+        if self.rank == 0:
             flat = torch.cat([p.detach().reshape(-1) for p in self.params], 0)
             if pad:
                 flat = torch.cat([flat, torch.zeros(pad, device=self.dev, dtype=flat.dtype)], 0)
-            shard = flat
+            chunks = list(flat.chunk(self.world, 0))
         else:
-            if self.rank == 0:
-                flat = torch.cat([p.detach().reshape(-1) for p in self.params], 0)
-                if pad:
-                    flat = torch.cat([flat, torch.zeros(pad, device=self.dev, dtype=flat.dtype)], 0)
-                chunks = list(flat.chunk(self.world, 0))
-            else:
-                chunks = None
-            shard = torch.empty(self.shard_size, device=self.dev, dtype=self.params[0].dtype)
-            dist.scatter(shard, scatter_list=chunks, src=0)
+            chunks = None
+
+        shard = torch.empty(self.shard_size, device=self.dev, dtype=self.params[0].dtype)
+        dist.scatter(shard, scatter_list=chunks, src=0)
 
         self.shard = nn.Parameter(shard.to(torch.float32), requires_grad=True)
         self.opt = torch.optim.AdamW([self.shard], lr=lr, weight_decay=wd)
@@ -90,6 +86,8 @@ class DIYFSDPBlockAB(nn.Module):
         if register_backward_hook:
             self.mod.register_full_backward_hook(self._post_backward_hook)
 
+        self.sync_collectives = cfg.sync_collectives
+
     # ---------- collectives ----------
     @torch.no_grad()
     def _all_gather_into(self, out_flat: torch.Tensor, *, async_op: bool):
@@ -105,7 +103,17 @@ class DIYFSDPBlockAB(nn.Module):
         """
         Enqueue AG into the parity buffer on gather_stream; record an event for compute to wait on.
         """
-        flat_full = self.bufpool.buffer_for(self.block_idx)  # global A/B buffer
+        flat_full = self.bufpool.buffer_for(self.block_idx)
+
+        if self.sync_collectives:
+            # --- SYNC MODE ---
+            # Run AG synchronously on the compute stream
+            dist.all_gather_into_tensor(flat_full, self.shard)  # blocking
+            self._prefetch_target = flat_full
+            self._ag_event = None
+            return
+
+        # --- ASYNC MODE ---
         with torch.cuda.stream(self.gather_stream):
             _ = self._all_gather_into(flat_full, async_op=True)
         self._ag_event = torch.cuda.Event()
@@ -137,30 +145,36 @@ class DIYFSDPBlockAB(nn.Module):
         # flatten grads
         flats = []
         for p in self.params:
-            g = (
-                p.grad
-                if p.grad is not None
-                else torch.zeros_like(p, device=self.dev, dtype=p.dtype)
-            )
+            g = p.grad if p.grad is not None else torch.zeros_like(p)
             flats.append(g.reshape(-1))
+
         g_full = torch.cat(flats, 0)
         if self.pad:
             g_full = torch.cat(
                 [g_full, torch.zeros(self.pad, device=self.dev, dtype=g_full.dtype)], 0
             )
-        self._grad_buf = g_full
 
+        self._grad_buf = g_full
         self._views_full = None
         self._prefetch_target = None
         self._ag_event = None
 
-        self._grad_shard = torch.empty_like(self.shard, dtype=g_full.dtype)
+        self._grad_shard = torch.empty_like(self.shard)
         input_flat = self._grad_buf
 
-        # Asynchronous reduce-scatter on dedicated CUDA stream
+        if self.sync_collectives:
+            # --- SYNC MODE ---
+            dist.reduce_scatter_tensor(self._grad_shard, input_flat, op=dist.ReduceOp.SUM)
+            self._rs_work = None
+            return
+
+        # --- ASYNC MODE ---
         with torch.cuda.stream(self.rs_stream):
             self._rs_work = dist.reduce_scatter_tensor(
-                self._grad_shard, input_flat, op=dist.ReduceOp.SUM, async_op=True
+                self._grad_shard,
+                input_flat,
+                op=dist.ReduceOp.SUM,
+                async_op=True,
             )
 
     @torch.no_grad()

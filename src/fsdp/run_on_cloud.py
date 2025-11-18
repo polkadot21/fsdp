@@ -9,7 +9,7 @@ from fsdp.dist_utils import ddp_cleanup, ddp_init
 from fsdp.train_loop import train_one_rank
 
 
-def _worker(rank: int, world_size: int, cfg: Config) -> None:
+def _worker(rank: int, world_size: int, cfg: Config, *, sync_mode: bool) -> None:
     """
     Child worker. Must set rank-specific env vars **before** ddp_init().
     """
@@ -29,7 +29,10 @@ def _worker(rank: int, world_size: int, cfg: Config) -> None:
     )
     ddp_init(rank, world_size)
     try:
-        train_one_rank(cfg.cloud, logdir=cfg.logs.dir, profile_steps=cfg.profiler.n_steps)
+        data_cfg = cfg.cloud
+        data_cfg.sync_collectives = sync_mode
+        outdir = f"{cfg.logs.dir}_{'sync' if sync_mode else 'async'}"
+        train_one_rank(cfg.cloud, logdir=outdir, profile_steps=cfg.profiler.n_steps)
     finally:
         ddp_cleanup()
 
@@ -58,10 +61,10 @@ def run_on_cloud() -> None:
     # ------------------------------------------------------------------
     # Multi-GPU case
     # ------------------------------------------------------------------
-    print("Spawning distributed workers...")
-    mp.spawn(
-        _worker,
-        args=(world_size, cfg),
-        nprocs=world_size,
-        join=True,
-    )
+    print("\n##### Running SYNC baseline (no overlap) #####\n")
+    mp.spawn(_worker, args=(world_size, cfg, True), nprocs=world_size)
+
+    print("\n##### Running ASYNC overlapped FSDP #####\n")
+    mp.spawn(_worker, args=(world_size, cfg, False), nprocs=world_size)
+
+    print("\n============= All experiments completed successfully. =============\n")
