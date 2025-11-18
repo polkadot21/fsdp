@@ -72,14 +72,14 @@ class DIYFSDPBlockAB(nn.Module):
             with torch.no_grad():
                 p.data = torch.empty_like(p, device=self.dev)
 
-        # Streams & events
-        self.rs_stream = torch.cuda.Stream()
-
-        self._rs_work = None  # NCCL work handle
-        self._grad_buf = None  # flat grads (with pad)
-        self._grad_shard = None  # reduced shard grads
-        self._views_full = None  # keeps full buffer alive while views exist
+        # async state
+        self._ag_work = None
         self._prefetch_target = None
+        self._views_full = None
+
+        self._grad_buf = None
+        self._grad_shard = None
+        self._rs_work = None
 
         # Hook to start RS asap
         if register_backward_hook:
@@ -98,63 +98,48 @@ class DIYFSDPBlockAB(nn.Module):
 
     @torch.no_grad()
     def prefetch_params_async(self):
-        """
-        Prefetch full params into the block's slice of the global buffer.
-
-        SYNC  mode: run all_gather_into_tensor synchronously (no overlap).
-        ASYNC mode: launch all_gather_into_tensor(async_op=True) and only
-                    wait in materialize_params() right before using the data.
-        """
         flat_full = self.bufpool.buffer_for(self.block_idx)
+        self._prefetch_target = flat_full
 
         if self.sync_collectives:
-            # ---- SYNC: blocking all-gather on current stream ----
+            # SYNC: blocking all-gather
             dist.all_gather_into_tensor(flat_full, self.shard)
-            self._prefetch_target = flat_full
             self._ag_work = None
-            return
-
-        # ---- ASYNC: overlapping all-gather ----
-        # NCCL runs on its internal comm stream; returning Work handle.
-        self._ag_work = dist.all_gather_into_tensor(
-            flat_full,
-            self.shard,
-            async_op=True,
-        )
-        self._prefetch_target = flat_full
+        else:
+            # ASYNC: launch and remember Work handle
+            self._ag_work = dist.all_gather_into_tensor(flat_full, self.shard, async_op=True)
 
     @torch.no_grad()
     def materialize_params(self):
-        """
-        Wait for all_gather (if async) and map parameter views into the buffer.
-        """
         flat_full = self._prefetch_target
         if flat_full is None:
             return
-        # For ASYNC mode, ensure AG is finished.
+
+        # For ASYNC mode, ensure AG is done before using buffer
         if self._ag_work is not None:
             self._ag_work.wait()
             self._ag_work = None
 
+        # map parameter views
         if self.pad:
             usable = flat_full[: -self.pad]
         else:
             usable = flat_full
+
         off = 0
         for p, n in zip(self.params, self.numels, strict=False):
             v = usable.narrow(0, off, n).view(p.shape)
-            p.data = v.view_as(p)
+            p.data = v.to(self.dtype_full)
             off += n
+
         self._views_full = flat_full
 
     @torch.no_grad()
     def _post_backward_hook(self, module, gin, gout):
-        # flatten grads
         flats = []
         for p in self.params:
             g = p.grad if p.grad is not None else torch.zeros_like(p)
             flats.append(g.reshape(-1))
-
         g_full = torch.cat(flats, 0)
         if self.pad:
             g_full = torch.cat(
@@ -164,38 +149,35 @@ class DIYFSDPBlockAB(nn.Module):
         self._grad_buf = g_full
         self._views_full = None
         self._prefetch_target = None
-        self._ag_event = None
 
         self._grad_shard = torch.empty_like(self.shard, dtype=g_full.dtype)
-        input_flat = self._grad_buf
 
         if self.sync_collectives:
-            # ---- SYNC: blocking reduce-scatter on default stream ----
+            # SYNC: blocking reduce-scatter
             dist.reduce_scatter_tensor(
                 self._grad_shard,
-                input_flat,
+                self._grad_buf,
                 op=dist.ReduceOp.SUM,
             )
             self._rs_work = None
-            return
-
-        # ---- ASYNC: launch RS on a separate CUDA stream ----
-        with torch.cuda.stream(self.rs_stream):
+        else:
+            # ASYNC: overlap reduce-scatter; wait in step_if_ready
             self._rs_work = dist.reduce_scatter_tensor(
                 self._grad_shard,
-                input_flat,
+                self._grad_buf,
                 op=dist.ReduceOp.SUM,
                 async_op=True,
             )
 
     @torch.no_grad()
-    def step_if_ready(self):
+    def step_if_ready(self) -> bool:
         if self._grad_buf is None:
             return False
 
         if self._rs_work is not None:
             self._rs_work.wait()
 
+        assert self._grad_shard is not None
         g32 = self._grad_shard.to(torch.float32) / (self.world if self.world > 1 else 1.0)
         self.shard.grad = g32
         self.opt.step()
@@ -204,7 +186,9 @@ class DIYFSDPBlockAB(nn.Module):
         for p in self.params:
             p.grad = None
 
-        self._grad_buf = self._grad_shard = self._rs_work = None
+        self._grad_buf = None
+        self._grad_shard = None
+        self._rs_work = None
         return True
 
     def forward(self, *args, **kwargs):
