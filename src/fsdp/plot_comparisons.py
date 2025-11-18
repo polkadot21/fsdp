@@ -1,162 +1,177 @@
+import glob
 import json
 import os
-from collections import defaultdict
 
 import matplotlib.pyplot as plt
 
-# Colors matching YaFSDP style
-COLOR_COMP = "#b7b7b7"  # compute background
-COLOR_FWD = "#80a0ff"  # compute kernels (blue-ish)
+# -------------------------------------------------------------
+# Color palette (YaFSDP-inspired)
+# -------------------------------------------------------------
+COLOR_BG = "#e8e8e8"  # background compute lane (light grey)
+COLOR_COMP = "#7aa7ff"  # compute kernels (blue-ish)
 COLOR_RS = "#70c070"  # reduce_scatter (green)
 COLOR_AG = "#e070a0"  # all_gather (pink)
-COLOR_ARROW = "#d03030"  # red
-
-COMM_RS = ["reduce_scatter", "reducescatter"]
-COMM_AG = ["all_gather", "allgather"]
+COLOR_AR = "#60c0d0"  # all_reduce or other NCCL (teal)
+COLOR_ARROW = "#d03030"  # red step arrow text & line
 
 
+# -------------------------------------------------------------
+# Utility to load profiler trace
+# -------------------------------------------------------------
 def _load_events(path):
     with open(path) as f:
-        trace = json.load(f)
-    events = [e for e in trace["traceEvents"] if e.get("ph") == "X"]
-    return events
+        tr = json.load(f)
+    return [e for e in tr["traceEvents"] if e.get("ph") == "X"]
 
 
-def _etype(evt_name):
-    name = evt_name.lower()
-    if any(k in name for k in COMM_RS):
+# -------------------------------------------------------------
+# Classify CUDA kernels into logical lanes
+# -------------------------------------------------------------
+def _etype(evt):
+    name = evt["name"].lower()
+
+    # NCCL kernels
+    if "reduce_scatter" in name or "reducescatter" in name:
         return "rs"
-    if any(k in name for k in COMM_AG):
+    if "all_gather" in name or "allgather" in name:
         return "ag"
+    if "all_reduce" in name or "allreduce" in name:
+        return "ar"
+    if "nccl" in name:
+        return "ar"  # all other NCCL into generic comm
+
+    # Everything non-NCCL is compute
     return "comp"
 
 
-def _parse_stream_id(tid):
-    """
-    Convert Chrome trace 'tid' field into an integer stream id.
-
-    Examples:
-      tid = "stream 7"   -> 7
-      tid = "7"          -> 7
-      tid = 7            -> 7
-      tid = "nccl:7"     -> 7
-      anything else      -> 0
-    """
-    if isinstance(tid, int):
-        return tid
-    if isinstance(tid, str):
-        # look for a number in the string, from right to left
-        for tok in reversed(tid.replace(":", " ").split()):
-            if tok.isdigit():
-                return int(tok)
-    # fallback
-    return 0
-
-
-def _group_by_stream(events):
-    """
-    Returns: dict[stream_id -> list of (type, start_ms, end_ms)]
-    """
-    streams = defaultdict(list)
+# -------------------------------------------------------------
+# Convert raw events → (t0, t1) intervals in ms
+# -------------------------------------------------------------
+def _to_intervals(events, min_us=50):
+    ops = []
 
     for e in events:
         dur_us = e.get("dur", 0)
-        if dur_us < 50:
+        if dur_us < min_us:
             continue
-
         ts = e["ts"] / 1000.0
         dur = dur_us / 1000.0
-        t = _etype(e["name"])
+        ops.append((_etype(e), ts, ts + dur))
 
-        stream_id = _parse_stream_id(e.get("tid", 0))
-        streams[stream_id].append((t, ts, ts + dur))
+    if not ops:
+        return [], 0.0
 
-    if not streams:
-        return {}
-
-    # Normalize time so that the first event across all streams starts at 0.
-    t0 = min(min(s for _, s, _ in evts) for evts in streams.values())
-    for sid in streams:
-        streams[sid] = [(t, s - t0, e - t0) for t, s, e in streams[sid]]
-
-    return streams
+    # Normalize timeline so that the first event starts at 0
+    t0 = min(s for _, s, _ in ops)
+    ops = [(t, s - t0, e - t0) for t, s, e in ops]
+    total = max(e for _, _, e in ops)
+    return ops, total
 
 
-def _draw_stream(ax, evts, label, total_ms):
-    # Draw background bar
-    ax.barh(0, total_ms, left=0, height=0.6, color=COLOR_COMP, edgecolor="none")
+# -------------------------------------------------------------
+# Draw a single row (compute or comm)
+# -------------------------------------------------------------
+def _draw_row(ax, ops, total_ms, label):
+    # background
+    ax.barh(0, total_ms, left=0, height=0.6, color=COLOR_BG, edgecolor="none")
 
-    for typ, s, e in evts:
+    # draw kernels
+    for typ, s, e in ops:
         if typ == "comp":
-            color = COLOR_FWD
+            ax.barh(0, e - s, left=s, height=0.6, color=COLOR_COMP, edgecolor="none")
         elif typ == "rs":
-            color = COLOR_RS
+            ax.barh(0, e - s, left=s, height=0.6, color=COLOR_RS, edgecolor="none")
         elif typ == "ag":
-            color = COLOR_AG
-        else:
-            color = "gray"
+            ax.barh(0, e - s, left=s, height=0.6, color=COLOR_AG, edgecolor="none")
+        elif typ == "ar":
+            ax.barh(0, e - s, left=s, height=0.6, color=COLOR_AR, edgecolor="none")
 
-        ax.barh(0, e - s, left=s, height=0.6, color=color)
+    # Step duration arrow
+    ax.annotate(
+        "",
+        xy=(0, 0.85),
+        xytext=(total_ms, 0.85),
+        arrowprops=dict(arrowstyle="<->", color=COLOR_ARROW, lw=2),
+    )
+    ax.text(
+        total_ms / 2,
+        0.95,
+        f"{total_ms:.0f} ms",
+        color=COLOR_ARROW,
+        fontsize=12,
+        ha="center",
+        va="bottom",
+    )
 
     ax.set_xlim(0, total_ms)
     ax.set_yticks([])
-    ax.set_title(label, fontsize=13)
+    ax.set_title(label, fontsize=13, pad=15)
+    ax.set_xlabel("Time (ms)")
 
 
-def _pick_streams(streams):
-    """
-    Heuristic:
-      - Compute stream is the *lowest* stream id.
-      - Remaining streams are "comm" streams (RS/AG mixed).
-    """
-    if not streams:
-        return 0, []
-
-    stream_ids = sorted(int(k) for k in streams.keys())
-    compute = stream_ids[0]
-    comm = stream_ids[1:]
-    return compute, comm
+# -------------------------------------------------------------
+# Split events into:
+#   - compute ops
+#   - comm ops (rs/ag/ar) combined
+# -------------------------------------------------------------
+def _split_compute_and_comm(ops):
+    comp = [(t, s, e) for (t, s, e) in ops if t == "comp"]
+    comm = [(t, s, e) for (t, s, e) in ops if t != "comp"]
+    return comp, comm
 
 
+# -------------------------------------------------------------
+# Main public API
+# -------------------------------------------------------------
 def plot_comparisons(
-    sync_dir="logs_sync", async_dir="logs_async", out="logs/overlap_comparison.png"
+    sync_dir="logs_sync",
+    async_dir="logs_async",
+    out="logs/overlap_comparison.png",
 ):
-    # Load Chrome traces (rank0 only)
-    sync_path = os.path.join(sync_dir, "trace_rank0.json")
-    async_path = os.path.join(async_dir, "trace_rank0.json")
+    # --------------------------------------------------------
+    # Load traces (rank0 only)
+    # --------------------------------------------------------
+    sync_path = _first(glob.glob(os.path.join(sync_dir, "trace_rank0.json")))
+    async_path = _first(glob.glob(os.path.join(async_dir, "trace_rank0.json")))
 
-    sync_events = _load_events(sync_path)
-    async_events = _load_events(async_path)
+    if sync_path is None:
+        raise FileNotFoundError("SYNC trace not found at logs_sync/trace_rank0.json")
+    if async_path is None:
+        raise FileNotFoundError("ASYNC trace not found at logs_async/trace_rank0.json")
 
-    sync_streams = _group_by_stream(sync_events)
-    async_streams = _group_by_stream(async_events)
+    sync_ops_raw = _load_events(sync_path)
+    async_ops_raw = _load_events(async_path)
 
-    sync_compute, sync_comm = _pick_streams(sync_streams)
-    async_compute, async_comm = _pick_streams(async_streams)
+    sync_ops, sync_total = _to_intervals(sync_ops_raw)
+    async_ops, async_total = _to_intervals(async_ops_raw)
 
-    # Compute total duration
-    sync_total = max(en for evts in sync_streams.values() for _, _, en in evts)
-    async_total = max(en for evts in async_streams.values() for _, _, en in evts)
+    sync_comp, sync_comm = _split_compute_and_comm(sync_ops)
+    async_comp, async_comm = _split_compute_and_comm(async_ops)
 
-    fig, axs = plt.subplots(6, 1, figsize=(16, 10), sharex=False)
+    # --------------------------------------------------------
+    # Create figure like YaFSDP:
+    # Row1: Compute
+    # Row2: Communication (RS + AG + AR)
+    # --------------------------------------------------------
+    fig, axs = plt.subplots(2, 1, figsize=(14, 6), sharex=False)
 
-    # Async (top 3 rows)
-    _draw_stream(axs[0], async_streams[async_compute], "ASYNC: Compute Stream", async_total)
-    _draw_stream(axs[1], async_streams.get(async_comm[0], []), "ASYNC: NCCL RS Stream", async_total)
-    if len(async_comm) > 1:
-        _draw_stream(
-            axs[2], async_streams.get(async_comm[1], []), "ASYNC: NCCL AG Stream", async_total
-        )
+    # ASYNC
+    _draw_row(axs[0], async_comp + async_comm, async_total, "YaFSDP-style ASYNC (overlapped)")
 
-    # Sync (bottom 3 rows)
-    _draw_stream(axs[3], sync_streams[sync_compute], "SYNC: Compute Stream", sync_total)
-    _draw_stream(axs[4], sync_streams.get(sync_comm[0], []), "SYNC: NCCL RS Stream", sync_total)
-    if len(sync_comm) > 1:
-        _draw_stream(axs[5], sync_streams.get(sync_comm[1], []), "SYNC: NCCL AG Stream", sync_total)
+    # SYNC
+    _draw_row(axs[1], sync_comp + sync_comm, sync_total, "FSDP baseline SYNC")
 
     plt.tight_layout()
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     plt.savefig(out, dpi=150)
-    print(f"Saved YaFSDP-style comparison → {out}")
+    print(f"Saved YaFSDP-style comparison figure → {out}")
+
+
+# -------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------
+def _first(lst):
+    return lst[0] if lst else None
 
 
 __all__ = ["plot_comparisons"]
