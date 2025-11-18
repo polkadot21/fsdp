@@ -104,7 +104,7 @@ def get_cfg() -> Config:
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("WORLD_SIZE", str(world_size))
-    print(f"Env: {os.environ}")
+    print(f"Env addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}")
     print("################################################")
 
     return Config()
