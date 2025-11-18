@@ -18,6 +18,7 @@ dependencies = [
   "rich>=13.7",
   "pydantic>=2.12.4",
   "pydantic-settings>=2.12.0",
+  "flash-attn>=2.8.3",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,8 @@ packages = ["src/fsdp"]
 [tool.hatch.build.targets.editable]
 packages = ["src/fsdp"]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [tool.ruff]
 line-length = 100

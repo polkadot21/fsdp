@@ -4,19 +4,16 @@ import torch.distributed as dist
 from fsdp import consts
 
 
-def ddp_init(rank: int, world_size: int) -> tuple[bool, consts.DdpBackend]:
-    use_cuda = torch.cuda.is_available()
-    backend = consts.DdpBackend.NCCL if use_cuda and world_size > 1 else consts.DdpBackend.GLOO
+def ddp_init(rank: int, world_size: int) -> None:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(backend=consts.DdpBackend.NCCL, rank=rank, world_size=world_size)
 
-    if world_size > 1:
-        if use_cuda:
-            torch.cuda.set_device(rank)
-            print(
-                f"[ddp_init] rank={rank} set_device({rank}), "
-                f"current_device={torch.cuda.current_device()}"
-            )
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-    return use_cuda, backend
+    print(
+        f"[ddp_init] rank={rank} set_device({rank}), "
+        f"current_device={torch.cuda.current_device()}"
+    )
+
+    return
 
 
 def ddp_cleanup() -> None:

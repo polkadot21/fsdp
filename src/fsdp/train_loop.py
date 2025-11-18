@@ -11,20 +11,31 @@ from fsdp.buffer_pool import TwoBufferPool
 from fsdp.data import make_batch
 from fsdp.dist_utils import barrier, world_info
 from fsdp.dummy_fsdp import DIYFSDPBlockAB
-from fsdp.model import TinyModel
+
+try:
+    from fsdp.models.model_with_flash_attn import Model as BaseModel
+
+    _USING_FLASH = True
+except ImportError:
+    from fsdp.models.tiny_model import TinyModel as BaseModel
+
+    _USING_FLASH = False
+
 from fsdp.profiling_utils import analyze_profiler, print_ascii_gantt
 
 _PRINTED_STEP_ONCE_DEVICE: bool = False
 
+print(f"Using flash attn: {_USING_FLASH}")
+
 
 class FSDPWrappedModel(torch.nn.Module):
-    def __init__(self, cfg: config.BaseSetup, device: torch.device, lr, wd):
+    def __init__(self, cfg: config.BaseSetup, device: torch.device, lr: float, wd):
         super().__init__()
         self.cfg = cfg
         self.dev = device
-        print(f"[FSDPWrappedModel] constructing on device={device}")
 
-        m = TinyModel(
+        print(f"[FSDPWrappedModel] constructing on device={device}")
+        m = BaseModel(
             cfg.in_dim,
             cfg.dim,
             cfg.n_heads,
@@ -32,8 +43,9 @@ class FSDPWrappedModel(torch.nn.Module):
             cfg.n_layers,
         ).to(device)
 
-        print(f"[FSDPWrappedModel] TinyModel.inp.weight.device={m.inp.weight.device}")
-
+        print(f"[FSDPWrappedModel] BaseModel.inp.weight.device={m.inp.weight.device}")
+        print("")
+        print("Constructing buffers")
         dummy_blocks = []
         sizes = []
         for i, blk in enumerate(m.blocks):
@@ -43,6 +55,7 @@ class FSDPWrappedModel(torch.nn.Module):
 
         max_full = max(sizes)
         bufpool = TwoBufferPool(max_full, device=torch.device(device), dtype=torch.float32)
+        print(f"Constructed buffers with size: {max_full}")
 
         self.inp = m.inp
         self.blocks = torch.nn.ModuleList(
@@ -55,13 +68,13 @@ class FSDPWrappedModel(torch.nn.Module):
             f"[FSDPWrappedModel] real block 0 first_param_device="
             f"{next(self.blocks[0].mod.parameters()).device}"
         )
-
         self.out = m.out
 
     def forward(self, x: torch.Tensor):
         # schedule: prefetch block0, then loop blocks
         self.blocks[0].prefetch_params_async()
         self.blocks[0].materialize_params()
+
         x = self.inp(x)
         for i, blk in enumerate(self.blocks):
             # prefetch next while computing current
@@ -117,15 +130,12 @@ def step_once(cfg: config.BaseSetup, dev: torch.device, model) -> float:
 
 def train_one_rank(
     data_cfg: config.BaseSetup,
-    logdir: str = "logs",
+    logdir: str,
     profile_steps: int = 8,
 ) -> None:
     rank, world = world_info()
-    dev = (
-        torch.device(consts.Device.CUDA, rank)
-        if torch.cuda.is_available()
-        else torch.device(consts.Device.CPU)
-    )
+    dev = torch.device(consts.Device.CUDA, rank)
+
     print(
         f"[train_one_rank] rank={rank} world={world} dev={dev} "
         f"cuda_available={torch.cuda.is_available()}"
@@ -135,7 +145,6 @@ def train_one_rank(
     print(f"[train_one_rank] rank={rank} first_param_device=" f"{next(model.parameters()).device}")
 
     warmup(data_cfg, dev, model)
-    # Simple runtime printout
     t = sum(step_once(data_cfg, dev, model) for _ in range(10)) / 10
     if rank == 0:
         print(f"[rank{rank}] avg step: {t*1e3:.1f} ms  (world={world})")

@@ -3,6 +3,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from fsdp import consts
+from fsdp.buffer_pool import TwoBufferPool
 from fsdp.dist_utils import world_info
 
 
@@ -21,7 +22,7 @@ class DIYFSDPBlockAB(nn.Module):
         device: torch.device,
         module: nn.Module,
         block_idx: int,
-        bufpool,
+        bufpool: TwoBufferPool,
         lr=1e-3,
         wd=0.0,
         dtype_full=torch.float32,
@@ -74,8 +75,8 @@ class DIYFSDPBlockAB(nn.Module):
                 p.data = torch.empty_like(p, device=self.dev)
 
         # Streams & events
-        self.gather_stream = torch.cuda.Stream() if self.dev.type == consts.Device.CUDA else None
-        self.rs_stream = torch.cuda.Stream() if self.dev.type == consts.Device.CUDA else None
+        self.gather_stream = torch.cuda.Stream()
+        self.rs_stream = torch.cuda.Stream()
 
         self._ag_event = None  # marks AG completion
         self._rs_work = None  # NCCL work handle
@@ -88,16 +89,12 @@ class DIYFSDPBlockAB(nn.Module):
 
     # ---------- collectives ----------
     @torch.no_grad()
-    def _all_gather_into(self, out_flat: torch.Tensor, async_op: bool):
-        if self.world == 1:
-            out_flat.copy_(self.shard)
-            return None
-        else:
-            chunks = [
-                out_flat.narrow(0, i * self.shard_size, self.shard_size).view_as(self.shard)
-                for i in range(self.world)
-            ]
-            return dist.all_gather(chunks, self.shard, async_op=async_op)
+    def _all_gather_into(self, out_flat: torch.Tensor, *, async_op: bool):
+        chunks = [
+            out_flat.narrow(0, i * self.shard_size, self.shard_size).view_as(self.shard)
+            for i in range(self.world)
+        ]
+        return dist.all_gather(chunks, self.shard, async_op=async_op)
 
     # ---------- prefetch ----------
     @torch.no_grad()
@@ -106,14 +103,10 @@ class DIYFSDPBlockAB(nn.Module):
         Enqueue AG into the parity buffer on gather_stream; record an event for compute to wait on.
         """
         flat_full = self.bufpool.buffer_for(self.block_idx)  # global A/B buffer
-        if self.gather_stream is None:
-            self._all_gather_into(flat_full, async_op=False)
-            self._ag_event = None
-        else:
-            with torch.cuda.stream(self.gather_stream):
-                _ = self._all_gather_into(flat_full, async_op=True)
-            self._ag_event = torch.cuda.Event()
-            self._ag_event.record(self.gather_stream)
+        with torch.cuda.stream(self.gather_stream):
+            _ = self._all_gather_into(flat_full, async_op=True)
+        self._ag_event = torch.cuda.Event()
+        self._ag_event.record(self.gather_stream)
         self._prefetch_target = flat_full
 
     @torch.no_grad()
@@ -158,35 +151,23 @@ class DIYFSDPBlockAB(nn.Module):
         self._prefetch_target = None
         self._ag_event = None
 
-        if self.world == 1:
-            self._grad_shard = g_full
-            self._rs_work = None
-        else:
-            self._grad_shard = torch.empty_like(self.shard, dtype=g_full.dtype)
-            input_flat = self._grad_buf
+        self._grad_shard = torch.empty_like(self.shard, dtype=g_full.dtype)
+        input_flat = self._grad_buf
 
-            if self.rs_stream is None:
-                # Synchronous path
-                dist.reduce_scatter_tensor(
-                    self._grad_shard,
-                    input_flat,
-                    op=dist.ReduceOp.SUM,
-                )
-                self._rs_work = None
-
-            else:
-                # Asynchronous reduce-scatter on dedicated CUDA stream
-                with torch.cuda.stream(self.rs_stream):
-                    self._rs_work = dist.reduce_scatter_tensor(
-                        self._grad_shard, input_flat, op=dist.ReduceOp.SUM, async_op=True
-                    )
+        # Asynchronous reduce-scatter on dedicated CUDA stream
+        with torch.cuda.stream(self.rs_stream):
+            self._rs_work = dist.reduce_scatter_tensor(
+                self._grad_shard, input_flat, op=dist.ReduceOp.SUM, async_op=True
+            )
 
     @torch.no_grad()
     def step_if_ready(self):
         if self._grad_buf is None:
             return False
+
         if self._rs_work is not None:
             self._rs_work.wait()
+
         g32 = self._grad_shard.to(torch.float32) / (self.world if self.world > 1 else 1.0)
         self.shard.grad = g32
         self.opt.step()
@@ -194,6 +175,7 @@ class DIYFSDPBlockAB(nn.Module):
 
         for p in self.params:
             p.grad = None
+
         self._grad_buf = self._grad_shard = self._rs_work = None
         return True
 

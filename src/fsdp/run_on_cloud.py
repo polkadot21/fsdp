@@ -15,29 +15,21 @@ def _worker(rank: int, world_size: int, cfg: Config) -> None:
     """
 
     # ---- Required for torch.distributed.init_process_group(init_method="env://") ----
+    print(f"Setting env for rank: {rank}")
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
+    msg = f"Env: {os.environ['RANK']}, local rank: {os.environ['LOCAL_RANK']}"
+    print(msg)
+    print("################################################")
 
-    # For debugging
     print(
         f"[worker {rank}] torch.cuda.is_available={torch.cuda.is_available()}, "
         f"device_count={torch.cuda.device_count()}"
     )
-
-    # Let ddp_init read these correctly
-    use_cuda, backend = ddp_init(rank, world_size)
-
-    if use_cuda:
-        print(
-            f"[worker {rank}] current_device={torch.cuda.current_device()}, "
-            f"name={torch.cuda.get_device_name(torch.cuda.current_device())}"
-        )
-
-    print(f"[worker {rank}] CUDA={use_cuda} backend={backend}")
-
+    ddp_init(rank, world_size)
     try:
-        train_one_rank(cfg.cloud, logdir=cfg.logs.dir, profile_steps=8)
+        train_one_rank(cfg.cloud, logdir=cfg.logs.dir, profile_steps=cfg.profiler.n_steps)
     finally:
         ddp_cleanup()
 
@@ -54,32 +46,22 @@ def run_on_cloud() -> None:
         print(err_msg)
         raise exceptions.CudaNotFoundError(err_msg)
 
-    cfg = get_cfg()
     world_size = torch.cuda.device_count()
-    print(f"Launching with world_size={world_size} with {world_size} GPUs")
+    if world_size < 2:
+        err_msg = f"For FSDP two or more GPUs required, current count: {world_size}"
+        print(err_msg)
+        raise exceptions.NotEnoughGpuError(err_msg)
 
-    # ------------------------------------------------------------------
-    # For mp.spawn + env://, we MUST set MASTER_ADDR/MASTER_PORT manually.
-    # torchrun usually does this, but Jupyter notebook does NOT.
-    # ------------------------------------------------------------------
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
+    print(f"Launching experiment with {world_size} GPUs")
 
+    cfg = get_cfg()
     # ------------------------------------------------------------------
     # Multi-GPU case
     # ------------------------------------------------------------------
-    if world_size > 1:
-        print("Spawning distributed workers...")
-        mp.spawn(
-            _worker,
-            args=(world_size, cfg),
-            nprocs=world_size,
-            join=True,
-        )
-
-    # ------------------------------------------------------------------
-    # Single-process fallback (CPU or 1 GPU)
-    # ------------------------------------------------------------------
-    else:
-        _worker(rank=0, world_size=1, cfg=cfg)
+    print("Spawning distributed workers...")
+    mp.spawn(
+        _worker,
+        args=(world_size, cfg),
+        nprocs=world_size,
+        join=True,
+    )

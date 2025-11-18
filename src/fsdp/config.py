@@ -1,5 +1,7 @@
 import functools
+import os
 
+import torch
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -60,7 +62,11 @@ class CloudSetup(BaseSetup):
 
 
 class Logs(BaseSettings):
-    dir: str = "logs"
+    dir: str = Field("logs")
+
+
+class Profiler(BaseSettings):
+    n_steps: int = Field(8)
 
 
 # -----------------------------
@@ -75,6 +81,7 @@ class Config(BaseSettings):
     cpu: CPUSetup = CPUSetup()
     cloud: CloudSetup = CloudSetup()
     logs: Logs = Logs()
+    profiler: Profiler = Profiler()
 
     class Config:
         extra = "ignore"
@@ -86,4 +93,18 @@ def get_cfg() -> Config:
     Cached singleton config instance.
     Imported everywhere to avoid reallocation.
     """
+
+    world_size = torch.cuda.device_count()
+
+    # ------------------------------------------------------------------
+    # For mp.spawn + env://, we MUST set MASTER_ADDR/MASTER_PORT manually.
+    # torchrun usually does this, but Jupyter notebook does NOT.
+    # ------------------------------------------------------------------
+    print(f"Setting env for torch multiprocessing for world_size: {world_size}")
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    os.environ.setdefault("WORLD_SIZE", str(world_size))
+    print(f"Env: {os.environ}")
+    print("################################################")
+
     return Config()

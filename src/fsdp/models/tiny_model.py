@@ -16,9 +16,9 @@ class MultiheadSelfAttention(nn.Module):
         B, T, D = x.shape
         qkv = self.qkv(x).view(B, T, 3, self.n_heads, self.hd).transpose(1, 2)  # [B,3,T,H,hd]
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # [B,T,H,hd]
-        q = q.transpose(1, 2)
+        q = q.transpose(1, 2)  # [B,H,T,hd]
         k = k.transpose(1, 2)
-        v = v.transpose(1, 2)  # [B,H,T,hd]
+        v = v.transpose(1, 2)
         att = (q @ k.transpose(-2, -1)) / (self.hd**0.5)  # [B,H,T,T]
         att = att.softmax(dim=-1)
         out = att @ v  # [B,H,T,hd]
@@ -51,6 +51,14 @@ class Block(nn.Module):
 
 
 class TinyModel(nn.Module):
+    """
+    Canonical base model API:
+
+      __init__(in_dim, dim, n_heads, ff_dim, n_layers)
+      attributes: inp, blocks, out
+      forward(x: [B,T,in_dim]) -> [B,T,in_dim]
+    """
+
     def __init__(self, in_dim=512, dim=512, n_heads=8, ff_dim=2048, n_layers=4):
         super().__init__()
         self.inp = nn.Linear(in_dim, dim, bias=False)
