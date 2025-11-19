@@ -40,11 +40,16 @@ class DIYFSDPBlockAB(nn.Module):
         self.rank, self.world = world_info()
         self.dev = device
         self.mod.to(self.dev)
+
         logger.debug(
             f"[DIYFSDPBlockAB] rank={self.rank} block_idx={block_idx} "
             f"mod_first_param_device={next(self.mod.parameters()).device}"
         )
 
+        # the easiest way to preserve the param ordering is to sort them by names, e.g.
+        #      name              |    shape      |   flattened
+        # block0.in_proj.weight	 | [4096, 4096]  |	   0 → 16M
+        # block0.out_proj.weight | [4096, 4096]	 |    16M → 32M
         named = [(n, p) for n, p in self.mod.named_parameters(recurse=True) if p.requires_grad]
         named.sort(key=lambda x: x[0])
         self.params = [p for _, p in named]
@@ -55,6 +60,14 @@ class DIYFSDPBlockAB(nn.Module):
         self.pad = pad
         self.shard_size = (tot + pad) // self.world
 
+        # FSDP needs:
+        ## Full weights for compute
+        ## Sharded weights for storage
+        ####################
+        # At the init stage:
+        # We collect all parameters on rank 0 → scatter shards to all GPUs
+        # So that only local shard is stored, full parameters are dropped
+        # The flow is: Full (init) → Scatter (init) → Gather (forward)  → Compute → ReduceScatter (backward) → Shard # noqa
         if self.rank == 0:
             flat = torch.cat([p.detach().reshape(-1) for p in self.params], 0)
             if pad:
@@ -97,6 +110,15 @@ class DIYFSDPBlockAB(nn.Module):
         ]
         return dist.all_gather(chunks, self.shard, async_op=async_op)
 
+    # In case 3 blocks with 2 GPUs (world_size=2)
+    # GPU0: shard(layer0) shard(layer1) shard(layer2)
+    # GPU1: shard(layer0) shard(layer1) shard(layer2)
+    #
+    # prefetch_params_async() schedules all_gather for the next block's weights
+    # i.a.: it prefetch(block1) while the compute stream computes block0
+    # materialize_params() is called before executing the block because it wait() for async all_gather to finish # noqa
+    # and it creates views from gathered flat buffer back into parameter tensors
+
     @torch.no_grad()
     def prefetch_params_async(self):
         flat_full = self.bufpool.buffer_for(self.block_idx)
@@ -127,14 +149,27 @@ class DIYFSDPBlockAB(nn.Module):
         else:
             usable = flat_full
 
+        # ┌──────────────────────────────────────────┐
+        # │ flat_full (big contiguous buffer)        │
+        # │                                          │
+        # │ [ P0 region | P1 region | P2 region ] ...│
+        # └──────────────────────────────────────────┘
+        #     ↑          ↑          ↑
+        #     │          │          │
+        # p0.data     p1.data     p2.data       ...
+        # (views)      (views)     (views)
         off = 0
         for p, n in zip(self.params, self.numels, strict=False):
             v = usable.narrow(0, off, n).view(p.shape)
+            # p.data is just a tensor object whose storage pointer references a slice of flat_full (without padding) # noqa
             p.data = v.to(self.dtype_full)
             off += n
 
         self._views_full = flat_full
 
+    # backward execution is trigger-based
+    # when block7 backward finishes → reduce_scatter immediately
+    # when block6 finishes → reduce_scatter
     @torch.no_grad()
     def _post_backward_hook(self, module, gin, gout):
         flats = []
