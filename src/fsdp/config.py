@@ -1,5 +1,6 @@
 import functools
 import os
+import sys
 
 import torch
 from loguru import logger
@@ -66,6 +67,7 @@ class CloudSetup(BaseSetup):
 
 class Logs(BaseSettings):
     dir: str = Field("logs")
+    level: str = Field("INFO")
 
 
 class Profiler(BaseSettings):
@@ -103,6 +105,7 @@ def get_cfg() -> Config:
     # For mp.spawn + env://, we MUST set MASTER_ADDR/MASTER_PORT manually.
     # torchrun usually does this, but Jupyter notebook does NOT.
     # ------------------------------------------------------------------
+    cfg = Config()
     logger.info("################################################")
     logger.info("Starting FSDP experiments")
     logger.info("We will train a tiny tranformer model with SYNC & ASYNC compute/comm with FSDP")
@@ -114,6 +117,10 @@ def get_cfg() -> Config:
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("WORLD_SIZE", str(world_size))
     logger.debug(f"Env addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}")
+
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
+    logger.info(f"Logger level: {cfg.logs.level}")
     logger.debug("################################################")
 
-    return Config()
+    return cfg
