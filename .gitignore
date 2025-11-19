@@ -218,3 +218,5 @@ __marimo__/
 logs_cpu
 logs_async
 logs_sync
+
+.DS_Store
