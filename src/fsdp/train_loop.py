@@ -21,8 +21,6 @@ except ImportError:
 
     _USING_FLASH = False
 
-from fsdp.profiling_utils import analyze_profiler, print_ascii_gantt
-
 _PRINTED_STEP_ONCE_DEVICE: bool = False
 
 print(f"Using flash attn: {_USING_FLASH}")
@@ -201,8 +199,6 @@ def train_one_rank(
         barrier()
 
     prof.export_chrome_trace(trace_path)
-    analyze_profiler(prof, rank)
-    print_ascii_gantt(prof, rank)
 
     if rank == 0:
         print(f"Saved trace: {trace_path}")
