@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.multiprocessing as mp
+from loguru import logger
 
 from fsdp import exceptions
 from fsdp.config import Config, get_cfg
@@ -15,15 +16,15 @@ def _worker(rank: int, world_size: int, cfg: Config, sync_mode: bool) -> None:
     """
 
     # ---- Required for torch.distributed.init_process_group(init_method="env://") ----
-    print(f"Setting env for rank: {rank}")
+    logger.debug(f"Setting env for rank: {rank}")
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     msg = f"Env: {os.environ['RANK']}, local rank: {os.environ['LOCAL_RANK']}"
-    print(msg)
-    print("################################################")
+    logger.debug(msg)
+    logger.debug("################################################")
 
-    print(
+    logger.debug(
         f"[worker {rank}] torch.cuda.is_available={torch.cuda.is_available()}, "
         f"device_count={torch.cuda.device_count()}"
     )
@@ -46,26 +47,26 @@ def run_on_cloud() -> None:
 
     if not torch.cuda.is_available():
         err_msg = f"CUDA available: {torch.cuda.is_available()}"
-        print(err_msg)
+        logger.error(err_msg)
         raise exceptions.CudaNotFoundError(err_msg)
 
     world_size = torch.cuda.device_count()
     if world_size < 2:
         err_msg = f"For FSDP two or more GPUs required, current count: {world_size}"
-        print(err_msg)
+        logger.error(err_msg)
         raise exceptions.NotEnoughGpuError(err_msg)
 
-    print(f"Launching experiment with {world_size} GPUs")
+    logger.info(f"Launching experiment with {world_size} GPUs")
 
     cfg = get_cfg()
     # ------------------------------------------------------------------
     # Multi-GPU case
     # ------------------------------------------------------------------
-    print("Spawning distributed workers...")
-    print("\n##### Running SYNC baseline (no overlap) #####\n")
+    logger.info("Spawning distributed workers...")
+    logger.info("\n##### Running SYNC baseline (no overlap) #####\n")
     mp.spawn(_worker, args=(world_size, cfg, True), nprocs=world_size)
 
-    print("\n##### Running ASYNC overlapped FSDP #####\n")
+    logger.info("\n##### Running ASYNC overlapped FSDP #####\n")
     mp.spawn(_worker, args=(world_size, cfg, False), nprocs=world_size)
 
-    print("Experiments complete!")
+    logger.info("Experiments complete!")

@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from loguru import logger
 
 from fsdp import config
 from fsdp.buffer_pool import TwoBufferPool
@@ -39,7 +40,7 @@ class DIYFSDPBlockAB(nn.Module):
         self.rank, self.world = world_info()
         self.dev = device
         self.mod.to(self.dev)
-        print(
+        logger.debug(
             f"[DIYFSDPBlockAB] rank={self.rank} block_idx={block_idx} "
             f"mod_first_param_device={next(self.mod.parameters()).device}"
         )

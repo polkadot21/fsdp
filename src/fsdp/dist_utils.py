@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+from loguru import logger
 
 from fsdp import consts
 
@@ -8,7 +9,7 @@ def ddp_init(rank: int, world_size: int) -> None:
     torch.cuda.set_device(rank)
     dist.init_process_group(backend=consts.DdpBackend.NCCL, rank=rank, world_size=world_size)
 
-    print(
+    logger.debug(
         f"[ddp_init] rank={rank} set_device({rank}), "
         f"current_device={torch.cuda.current_device()}"
     )

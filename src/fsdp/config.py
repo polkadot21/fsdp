@@ -2,6 +2,7 @@ import functools
 import os
 
 import torch
+from loguru import logger
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -102,11 +103,17 @@ def get_cfg() -> Config:
     # For mp.spawn + env://, we MUST set MASTER_ADDR/MASTER_PORT manually.
     # torchrun usually does this, but Jupyter notebook does NOT.
     # ------------------------------------------------------------------
-    print(f"Setting env for torch multiprocessing for world_size: {world_size}")
+    logger.info("################################################")
+    logger.info("Starting FSDP experiments")
+    logger.info("We will train a tiny tranformer model with SYNC & ASYNC compute/comm with FSDP")
+    logger.info("Then, the GPU profiling traces can be compared via Perfetto UI")
+    logger.info("P.S. By default, the flash attn module will be imported")
+    logger.info("If not available, there is a fallback for usual torch attention")
+    logger.debug(f"Setting env for torch multiprocessing for world_size: {world_size}")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("WORLD_SIZE", str(world_size))
-    print(f"Env addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}")
-    print("################################################")
+    logger.debug(f"Env addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}")
+    logger.debug("################################################")
 
     return Config()

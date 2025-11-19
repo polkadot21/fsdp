@@ -4,6 +4,7 @@ import time
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from loguru import logger
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from fsdp import config, consts
@@ -21,9 +22,8 @@ except ImportError:
 
     _USING_FLASH = False
 
-_PRINTED_STEP_ONCE_DEVICE: bool = False
 
-print(f"Using flash attn: {_USING_FLASH}")
+logger.debug(f"Using flash attn: {_USING_FLASH}")
 
 
 class FSDPWrappedModel(torch.nn.Module):
@@ -32,7 +32,7 @@ class FSDPWrappedModel(torch.nn.Module):
         self.cfg = cfg
         self.dev = device
 
-        print(f"[FSDPWrappedModel] constructing on device={device}")
+        logger.debug(f"Constructing FSDP blocks on device={device}")
         m = BaseModel(
             cfg.in_dim,
             cfg.dim,
@@ -41,9 +41,8 @@ class FSDPWrappedModel(torch.nn.Module):
             cfg.n_layers,
         ).to(device)
 
-        print(f"[FSDPWrappedModel] BaseModel.inp.weight.device={m.inp.weight.device}")
-        print("")
-        print("Constructing buffers")
+        logger.debug(f"BaseModel.inp.weight.device={m.inp.weight.device}")
+        logger.debug("Constructing buffers")
         dummy_blocks = []
         sizes = []
         for i, blk in enumerate(m.blocks):
@@ -65,7 +64,7 @@ class FSDPWrappedModel(torch.nn.Module):
             device=torch.device(device),
             dtype=torch.float32,
         )
-        print(
+        logger.debug(
             "Constructed buffers: "
             f"even_total={bufpool.buf_even.numel() if bufpool.buf_even is not None else 0}, "
             f"odd_total={bufpool.buf_odd.numel() if bufpool.buf_odd is not None else 0}"
@@ -87,7 +86,7 @@ class FSDPWrappedModel(torch.nn.Module):
                 for i, blk in enumerate(dummy_blocks)
             ]
         )
-        print(
+        logger.debug(
             f"[FSDPWrappedModel] real block 0 first_param_device="
             f"{next(self.blocks[0].mod.parameters()).device}"
         )
@@ -118,37 +117,33 @@ class FSDPWrappedModel(torch.nn.Module):
 
 
 def warmup(cfg: config.BaseSetup, dev: torch.device, model, n_steps: int = 3):
-    print(f"[warmup] running on device={dev}")
+    logger.info(f"[warmup] running on device={dev}")
     for step in range(n_steps):
         x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
         out = model(x)
         if step == 0:
-            print(f"[warmup] x.device={x.device}, y.device={y.device}, out.device={out.device}")
+            logger.debug(
+                f"[warmup] x.device={x.device}, y.device={y.device}, out.device={out.device}"
+            )
         loss = F.mse_loss(out, y)
         loss.backward()
         model.step_all()
         if dev.type == consts.Device.CUDA:
             torch.cuda.synchronize()
-    print(f"===== Warmup complete with {n_steps} steps")
+    logger.info(f"===== Warmup complete with {n_steps} steps")
 
 
 def step_once(cfg: config.BaseSetup, dev: torch.device, model) -> float:
-    global _PRINTED_STEP_ONCE_DEVICE
-
     x, y = make_batch(cfg.batch, cfg.T, cfg.in_dim, dev)
-    t0 = time.time()
+    t0 = time.perf_counter()
     out = model(x)
-
-    if not _PRINTED_STEP_ONCE_DEVICE:
-        print(f"[step_once] x.device={x.device}, y.device={y.device}, out.device={out.device}")
-        _PRINTED_STEP_ONCE_DEVICE = True
 
     loss = F.mse_loss(out, y)
     loss.backward()
     model.step_all()
     if dev.type == consts.Device.CUDA:
         torch.cuda.synchronize()
-    return time.time() - t0
+    return time.perf_counter() - t0
 
 
 def train_one_rank(
@@ -159,20 +154,20 @@ def train_one_rank(
     rank, world = world_info()
     dev = torch.device(consts.Device.CUDA, rank)
 
-    print(
+    logger.debug(
         f"[train_one_rank] rank={rank} world={world} dev={dev} "
         f"cuda_available={torch.cuda.is_available()}"
     )
 
     model = FSDPWrappedModel(data_cfg, device=dev, lr=data_cfg.lr, wd=data_cfg.wd).to(dev)
-    print(f"[train_one_rank] rank={rank} first_param_device=" f"{next(model.parameters()).device}")
+    logger.debug(f"Rank={rank} first_param_device=" f"{next(model.parameters()).device}")
 
     warmup(data_cfg, dev, model)
     t = sum(step_once(data_cfg, dev, model) for _ in range(10)) / 10
     if rank == 0:
-        print(f"[rank{rank}] avg step: {t*1e3:.1f} ms  (world={world})")
+        logger.debug(f"[rank{rank}] avg step: {t*1e3:.1f} ms  (world={world})")
 
-    print("Starting profiling")
+    logger.info("Starting profiling")
     os.makedirs(logdir, exist_ok=True)
     trace_path = os.path.join(logdir, f"trace_rank{rank}.json")
 
@@ -201,9 +196,9 @@ def train_one_rank(
     prof.export_chrome_trace(trace_path)
 
     if rank == 0:
-        print(f"Saved trace: {trace_path}")
+        logger.info(f"Saved trace: {trace_path}")
 
-    print("Short training loop to verify learning")
+    logger.debug("Short training loop to verify learning")
     for epoch in range(1, 3):
         losses = []
         for _ in range(data_cfg.steps):
@@ -217,5 +212,5 @@ def train_one_rank(
 
             losses.append(loss.item())
         m = sum(losses) / len(losses)
-        print(f"[rank{rank}] epoch {epoch} loss={m:.4f}")
+        logger.info(f"[rank{rank}] epoch {epoch} loss={m:.4f}")
         barrier()
