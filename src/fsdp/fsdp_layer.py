@@ -149,6 +149,15 @@ class FSDPLayer(nn.Module):
             p = self.params[param_idx]
             name = self.param_names[param_idx]
 
+            # DEBUG SHAPE
+            expected = self.param_shapes[param_idx]
+            if p.data.shape != expected:
+                self.log.debug(
+                    f"SHAPE MISMATCH! Name: {name} Param {param_idx} {self.param_names[param_idx]}"
+                )
+                self.log.debug(f"Expected for name: {name}: {expected}, Got: {p.data.shape}")
+                raise RuntimeError("Shape Mismatch in Unpack")
+
             # 3. VERBOSE LOGGING
             # We check if the Wrapper (p) matches the Data (p.data)
             # If p.numel() is 0 but p.data.numel() is 8192, we found the bug.

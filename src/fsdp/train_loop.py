@@ -78,6 +78,12 @@ def train_worker(rank, world_size, cfg):
     dist.barrier()
     logger.info(f"Rank {rank} | Warmup Complete.")
 
+    # Sanity Check Shapes
+    logger.info("Verifying Shapes...")
+    model.layers[0]._materialize()
+    for n, p in model.layers[0].named_parameters():
+        logger.info(f"{n}: {p.shape}")
+
     # -------------------------------------------------------------------------
     # 3. Profiling Loop
     # -------------------------------------------------------------------------
