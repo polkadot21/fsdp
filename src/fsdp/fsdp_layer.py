@@ -55,13 +55,7 @@ class FSDPLayer(nn.Module):
         self.params = [p for n, p in sorted(self.module.named_parameters())]
 
         # ---------------------------------------------------------------------
-        # 2. Map for Hooks
-        # ---------------------------------------------------------------------
-        for i, p in enumerate(self.params):
-            p._fsdp_tag = (self.block_idx, i)
-
-        # ---------------------------------------------------------------------
-        # 3. Flatten & Shard
+        # 2. Flatten & Shard
         # ---------------------------------------------------------------------
         flat_params = [p.detach().reshape(-1) for p in self.params]
         full_flat = torch.cat(flat_params)
@@ -83,13 +77,13 @@ class FSDPLayer(nn.Module):
         self.shard = nn.Parameter(my_slice)
 
         # ---------------------------------------------------------------------
-        # 4. Metadata
+        # 3. Metadata
         # ---------------------------------------------------------------------
         self.param_shapes = [p.shape for p in self.params]
         self.param_numels = [p.numel() for p in self.params]
 
         # ---------------------------------------------------------------------
-        # 5. Free Original Parameters (The "Emptying")
+        # 4. Free Original Parameters (The "Emptying")
         # ---------------------------------------------------------------------
         for p in self.params:
             p.data = torch.empty(0)
@@ -197,8 +191,21 @@ class FSDPLayer(nn.Module):
         # 2. Pointer Arithmetic (Resurrection)
         full_params = self.bufpool.get_buffer(self.block_idx)
         offset = 0
-        for p, numel, shape in zip(self.params, self.param_numels, self.param_shapes, strict=False):
-            p.data = full_params[offset : offset + numel].view(shape)
+        for i, (p, numel, shape) in enumerate(
+            zip(self.params, self.param_numels, self.param_shapes, strict=False)
+        ):
+            # Create the view
+            v = full_params[offset : offset + numel].view(shape)
+
+            # Tag the VIEW itself because this is what Autograd sees
+            v._fsdp_tag = (self.block_idx, i)
+
+            # Assign to parameter
+            p.data = v
+
+            # Tag the Parameter object (belt and suspenders)
+            p._fsdp_tag = (self.block_idx, i)
+
             offset += numel
 
         self._is_materialized = True
