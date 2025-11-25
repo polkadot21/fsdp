@@ -5,7 +5,7 @@ VENV_DIR  ?= .venv
 PYTHON    := $(VENV_DIR)/bin/python
 
 # ---- Phonies ----------------------------------------------------------------
-.PHONY: help venv install install-dev format lint test clean clean-venv
+.PHONY: help venv install install-dev format lint test test-real-model clean clean-venv
 
 # ---- Help -------------------------------------------------------------------
 help:
@@ -40,6 +40,9 @@ lint:
 # We export CUDA_VISIBLE_DEVICES= to force CPU even if running on a GPU machine
 test:
 	export CUDA_VISIBLE_DEVICES= && $(UV) run python tests/test_correctness.py
+
+test-real-model:
+	export CUDA_VISIBLE_DEVICES= && $(UV) run python tests/test_correctness_with_real_model.py
 
 # ---- Housekeeping ------------------------------------------------------------
 clean:

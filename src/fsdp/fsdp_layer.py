@@ -108,59 +108,43 @@ class FSDPLayer(nn.Module):
         # 1. Fast Path: ID Lookup
         t_id = id(tensor)
         if t_id in self._tensor_id_to_index:
-            block, idx = self._tensor_id_to_index[t_id]
-            name = self.param_names[idx]
-            self.log.debug(f"PackHook: ID Hit for {name} (ID: {t_id})")
-            return (block, idx)
+            return self._tensor_id_to_index[t_id]
 
-        # 2. Robust Path: Storage Check (The "Catch-All" Fix)
-        # If 'tensor' is a view of our buffer but has a different object ID (e.g. created by PyTorch internals), # noqa
-        # we can identify it by its memory address (data_ptr).
+        # 2. Storage Rescue
         if self._is_materialized:
-            # Check if tensor lives in our buffer
             buffer_storage = self.bufpool.get_buffer(self.block_idx).storage()
-
-            # Compare storage pointers (fastest check)
             if tensor.storage().data_ptr() == buffer_storage.data_ptr():
                 ptr = tensor.data_ptr()
-
-                # Scan params to find which one matches this data pointer
-                # (N is small, usually < 16, so this loop is cheap)
                 for i, p in enumerate(self.params):
                     if p.data_ptr() == ptr:
-                        name = self.param_names[i]
-                        self.log.debug(f"PackHook: Storage Rescue! ID miss but recovered {name}")
-                        return (self.block_idx, i)
+                        # FOUND IT!
+                        # Check if it is transposed
+                        is_transposed = False
+                        if tensor.shape != p.shape:
+                            if tensor.shape == p.shape[::-1]:
+                                is_transposed = True
+                            else:
+                                # Weird view? Skip rescue to be safe.
+                                return tensor
 
-        # If we reach here, it's genuinely an activation or input (not a weight)
-        self.log.debug("PackHook: Passed through (Activation/Input)")
+                        # Return tuple with transpose flag
+                        # Format: (block, param_idx, is_transposed_int)
+                        return (self.block_idx, i, int(is_transposed))
+
         return tensor
 
     def _unpack_hook(self, packed):
-        self.log.debug("_unpack_hook called for params")
+        # Check for our specific 3-element tuple
+        if isinstance(packed, tuple) and len(packed) == 3:
+            block_idx, param_idx, is_transposed_int = packed
 
-        if isinstance(packed, tuple) and len(packed) == 2:
-            block_idx, param_idx = packed
-
-            # 1. Resurrect (Refills p.data)
+            # 1. Resurrect
             self._materialize()
 
-            # 2. Retrieve the Parameter wrapper
+            # 2. Retrieve Base Tensor
             p = self.params[param_idx]
             name = self.param_names[param_idx]
 
-            # DEBUG SHAPE
-            expected = self.param_shapes[param_idx]
-            if p.data.shape != expected:
-                self.log.debug(
-                    f"SHAPE MISMATCH! Name: {name} Param {param_idx} {self.param_names[param_idx]}"
-                )
-                self.log.debug(f"Expected for name: {name}: {expected}, Got: {p.data.shape}")
-                raise RuntimeError("Shape Mismatch in Unpack")
-
-            # 3. VERBOSE LOGGING
-            # We check if the Wrapper (p) matches the Data (p.data)
-            # If p.numel() is 0 but p.data.numel() is 8192, we found the bug.
             self.log.debug(
                 f"Unpack: Name: {name} Block {block_idx} Param {param_idx} | "
                 f"P_ID: {id(p)} P_Size: {p.numel()} | "
@@ -168,16 +152,15 @@ class FSDPLayer(nn.Module):
                 f"Shape: {p.shape}"
             )
 
-            # 4. Sanity Check
-            if p.data.numel() == 0:
-                msg = f"FATAL: Name: {name} Param {param_idx} DATA is empty! Materialize failed."
-                self.log.critical(msg)
-                raise RuntimeError(msg)
+            if p.numel() == 0:
+                raise RuntimeError(f"FATAL: Param {param_idx} empty in unpack!")
 
-            # 5. Return p.data (The View), NOT p (The Wrapper)
-            # Autograd needs the dense tensor. If we return 'p' and it has cached
-            # metadata saying "I am size 0" from the forward pass, we crash.
-            return p.data
+            # 3. Apply Transpose if needed
+            out = p.data
+            if is_transposed_int:
+                out = out.t()
+
+            return out
 
         return packed
 
@@ -259,18 +242,10 @@ class FSDPLayer(nn.Module):
             v = full_params[offset : offset + numel].view(shape)
             p.data = v
 
-            # REGISTER BOTH PARAMETER AND VIEW IDs
-            # This catches both cases (Autograd saving 'p' or 'p.data')
-            self.log.debug(
-                f"Materialize: Caching p with {name} with ID: {id(p)}: {(self.block_idx, i)}"
-            )
-            self._tensor_id_to_index[id(p)] = (self.block_idx, i)
-            self.log.debug(
-                f"Materialize: Caching v with {name} with ID: {id(v)}: {(self.block_idx, i)}"
-            )
-            self._tensor_id_to_index[id(v)] = (self.block_idx, i)
-
-            self.log.debug(f"Materialized {name} | Shape: {shape}")
+            param_idx = (self.block_idx, i, 0)
+            self.log.debug(f"Materialize: storing name: {name}: {param_idx}")
+            self._tensor_id_to_index[id(p)] = param_idx
+            self._tensor_id_to_index[id(v)] = param_idx
 
             offset += numel
 
