@@ -43,7 +43,7 @@ class Config(BaseSettings):
         extra = "ignore"
 
 
-def get_model_config(mode: ModelType) -> Setup:
+def get_model_config(mode: ModelType, overlap: bool = True) -> Setup:
     """Factory to generate correct model sizes"""
     if mode == ModelType.POC:
         return Setup(
@@ -55,7 +55,7 @@ def get_model_config(mode: ModelType) -> Setup:
             n_layers=8,
             batch=4,
             T=512,
-            overlap=True,
+            overlap=overlap,
         )
     elif mode == ModelType.GIANT:
         return Setup(
@@ -67,7 +67,7 @@ def get_model_config(mode: ModelType) -> Setup:
             n_layers=16,
             batch=1,
             T=1024,
-            overlap=True,
+            overlap=overlap,
         )
     return Setup()
 

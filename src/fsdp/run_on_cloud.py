@@ -8,7 +8,7 @@ from fsdp.config import ModelType, get_cfg, get_model_config
 from fsdp.train_loop import train_worker
 
 
-def run_on_cloud(mode: str | ModelType = "poc"):
+def run_on_cloud(mode: str | ModelType = "poc", overlap: bool = True):
     """
     Main entry point for running FSDP experiments.
     Can be called from CLI or Jupyter Notebook.
@@ -44,11 +44,13 @@ def run_on_cloud(mode: str | ModelType = "poc"):
         logger.warning("If you are testing on CPU, run 'make test' instead.")
         return
 
-    logger.info(f"Launching FSDP Experiment on {world_size} GPUs. Mode: {mode.value.upper()}")
+    logger.info(
+        f"Launching FSDP Experiment on {world_size} GPUs. Mode: {mode.value.upper()}, Overlap: {overlap}"  # noqa
+    )
 
     # 3. Prepare Config
     cfg = base_cfg.model_copy()
-    cfg.train = get_model_config(mode)
+    cfg.train = get_model_config(mode, overlap)
     cfg.logs_dir = f"logs/{mode.value}"
     os.makedirs(cfg.logs_dir, exist_ok=True)
 
