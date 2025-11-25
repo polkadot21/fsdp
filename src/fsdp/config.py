@@ -5,31 +5,26 @@ from enum import Enum
 
 import torch
 from loguru import logger
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
 class ModelType(str, Enum):
-    POC = "poc"  # Fast run, visible overlap
-    GIANT = "giant"  # Massive compute, overlap is critical
+    POC = "poc"
+    GIANT = "giant"
 
 
 class Setup(BaseSettings):
     model_type: ModelType = ModelType.POC
-
-    # Architecture
     in_dim: int = 4096
     dim: int = 4096
     n_heads: int = 32
     ff_dim: int = 11008
     n_layers: int = 12
-
-    # Training
     batch: int = 4
     T: int = 1024
     steps: int = 10
     lr: float = 1e-4
-
-    # FSDP Flags
     overlap: bool = True
 
 
@@ -40,6 +35,8 @@ class Profiler(BaseSettings):
 class Config(BaseSettings):
     train: Setup = Setup()
     logs_dir: str = "logs"
+    # Added field to control logging level
+    log_level: str = Field("DEBUG", description="Logging level (DEBUG, INFO, WARNING)")
     profiler: Profiler = Profiler()
 
     class Config:
@@ -47,11 +44,8 @@ class Config(BaseSettings):
 
 
 def get_model_config(mode: ModelType) -> Setup:
-    """
-    Factory to produce consistent model configs.
-    """
+    """Factory to generate correct model sizes"""
     if mode == ModelType.POC:
-        # Balanced Compute/Comm to verify overlap mechanics
         return Setup(
             model_type=ModelType.POC,
             in_dim=2048,
@@ -64,7 +58,6 @@ def get_model_config(mode: ModelType) -> Setup:
             overlap=True,
         )
     elif mode == ModelType.GIANT:
-        # Heavy Compute dominance. Simulates 70B+ layer widths.
         return Setup(
             model_type=ModelType.GIANT,
             in_dim=8192,
@@ -88,6 +81,30 @@ def get_cfg() -> Config:
         os.environ["RANK"] = "0"
 
     cfg = Config()
+
+    # --- LOGGING SETUP ---
     logger.remove()
-    logger.add(sys.stderr, level="INFO")
+
+    # 1. Console Handler (Stderr)
+    #    Uses cfg.log_level (DEBUG) so you see everything in the terminal too.
+    logger.add(
+        sys.stderr,
+        level=cfg.log_level,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",  # noqa
+    )
+
+    # 2. File Handler (Always DEBUG for post-mortem analysis)
+    rank = int(os.environ["RANK"])
+    log_file = f"{cfg.logs_dir}/rank_{rank}.log"
+
+    logger.add(
+        log_file,
+        level="DEBUG",
+        rotation="100 MB",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{line} | {message}",
+    )
+
+    if rank == 0:
+        logger.info(f"Logging configured. Level: {cfg.log_level}. Logfile: {log_file}")
+
     return cfg
