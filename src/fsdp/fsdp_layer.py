@@ -135,7 +135,7 @@ class FSDPLayer(nn.Module):
     #  Logic: Communication & Synchronization
     # =========================================================================
     def prefetch_forward(self, phase="FWD"):
-        """Async AllGather. Phase label helps profiling."""
+        """Async AllGather."""
         if not self.cfg.overlap:
             return
 
@@ -145,7 +145,6 @@ class FSDPLayer(nn.Module):
 
             target_buf = self.bufpool.get_buffer(self.block_idx)
 
-            # TRACE: Explicitly mark AG with phase (FWD/BWD)
             with record_function(f"AG ({phase}) Block {self.block_idx}"):
                 dist.all_gather_into_tensor(
                     target_buf[: self.shard.numel() * dist.get_world_size()],

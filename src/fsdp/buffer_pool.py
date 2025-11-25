@@ -50,10 +50,6 @@ class StaticBufferPool:
         max_size = max(sizes)
         # 128-element alignment for NCCL efficiency
         aligned_size = math.ceil(max_size / 128) * 128
-
-        # Optional: Log the alignment logic if debugging obscure OOMs
-        # logger.trace(f"[StaticBufferPool] Max block: {max_size} -> Aligned: {aligned_size}")
-
         return cls(aligned_size, device, dtype)
 
     def get_buffer(self, idx: int) -> torch.Tensor:
