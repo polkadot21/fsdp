@@ -1,27 +1,21 @@
 # ---- Config -----------------------------------------------------------------
-
 UV        ?= uv
 PY        ?= python3.12
 VENV_DIR  ?= .venv
 PYTHON    := $(VENV_DIR)/bin/python
 
-# Force CPU for the smoke test
-export CUDA_VISIBLE_DEVICES ?=
-export OMP_NUM_THREADS ?= 8
-export MKL_NUM_THREADS ?= 8
-
 # ---- Phonies ----------------------------------------------------------------
-.PHONY: help venv install-cpu install-dev check cpu-test clean clean-venv
+.PHONY: help venv install install-dev format lint test clean clean-venv
 
 # ---- Help -------------------------------------------------------------------
 help:
 	@echo "Targets:"
 	@echo "  venv         - create .venv with uv"
-	@echo "  install-cpu  - install CPU wheels of torch + project (editable)"
-	@echo "  install-dev  - install dev/profiling extras"
-	@echo "  check        - import fsdp to verify installation"
-	@echo "  cpu-test     - run CPU-only smoke test (world_size=1, fat=False)"
-	@echo "  clean        - remove __pycache__ and logs"
+	@echo "  install      - install project in editable mode with dev dependencies"
+	@echo "  format       - run ruff format"
+	@echo "  lint         - run ruff check --fix"
+	@echo "  test         - run CPU simulation/correctness tests"
+	@echo "  clean        - remove __pycache__, logs, and temporary files"
 	@echo "  clean-venv   - remove .venv"
 
 # ---- Environment -------------------------------------------------------------
@@ -29,28 +23,29 @@ venv:
 	$(UV) venv --python $(PY)
 	@echo "Created venv in $(VENV_DIR)"
 
-# Install CPU-only PyTorch first, then your project (editable).
-install-cpu:
+# Install project + dev deps (ruff, pytest, torch)
+install:
 	$(UV) pip install --upgrade pip
-	$(UV) pip install "torch>=2.3.0" torchvision torchaudio
-	$(UV) pip install -e .
+	$(UV) pip install -e ".[dev]"
 
-# Optional dev/profiling extras
-install-dev: install-cpu
-	$(UV) pip -p $(PYTHON) install -e ".[dev,profiling]"
+# ---- Quality Code ------------------------------------------------------------
+format:
+	$(UV) run ruff format .
 
-# Quick import check
-check: install-cpu
-	$(PYTHON) -c "import fsdp; print('fsdp import OK')"
+lint:
+	$(UV) run ruff check . --fix
 
-# CPU smoke test: runs the library entrypoint with world_size=1 (no NCCL)
-cpu-test: install-cpu
-	$(PYTHON) -c "from fsdp import run_on_cloud; print('[make] CPU smoke test'); run_on_cloud(world_size=1, fat=False, logdir='logs_cpu'); print('[make] Done. Trace in logs_cpu/')"
+# ---- Testing -----------------------------------------------------------------
+# Runs the CPU correctness test suite (Stale Pointer Bug check)
+# We export CUDA_VISIBLE_DEVICES= to force CPU even if running on a GPU machine
+test:
+	export CUDA_VISIBLE_DEVICES= && $(UV) run python tests/test_correctness.py
 
 # ---- Housekeeping ------------------------------------------------------------
 clean:
 	find . -name "__pycache__" -type d -exec rm -rf {} + || true
-	rm -rf logs_cpu || true
+	find . -name "*.pyc" -delete
+	rm -rf logs logs_async logs_sync .pytest_cache .ruff_cache || true
 
 clean-venv:
 	rm -rf $(VENV_DIR)

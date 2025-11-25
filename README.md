@@ -2,7 +2,7 @@
 # FSDP with Asynchronous Overlap for Compute and Communication
 
 ### **📌 Summary**
-This repository explores a custom manual implementation of Fully Sharded Data Parallel (FSDP) with **asynchronous communication overlap**, inspired by **YaFSDP (Yet Another FSDP)**.  
+This repository explores a custom manual implementation of Fully Sharded Data Parallel (FSDP) with **asynchronous communication overlap**, inspired by **YaFSDP (Yet Another FSDP)**.
 The goal is to validate whether manually controlling **all_gather + reduce_scatter overlap** provides measurable benefits over standard synchronous FSDP execution.
 
 We compare:
@@ -97,8 +97,8 @@ To see meaningful difference, we would need:
 
 ## **🧠 Key Takeaways**
 
-✔ Our implementation successfully overlaps RS and AG via hooks  
-✔ Memory is efficiently handled using **views** rather than copies  
+✔ Our implementation successfully overlaps RS and AG via hooks
+✔ Memory is efficiently handled using **views** rather than copies
 
 ---
 

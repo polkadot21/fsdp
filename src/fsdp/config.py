@@ -1,126 +1,93 @@
 import functools
 import os
 import sys
+from enum import Enum
 
 import torch
 from loguru import logger
-from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
-class BaseSetup(BaseSettings):
-    """
-    Common fields for any training configuration.
-    """
-
-    in_dim: int = Field(..., description="Input embedding dimension")
-    dim: int = Field(..., description="Model hidden size")
-    n_heads: int = Field(..., description="Number of attention heads")
-    ff_dim: int = Field(..., description="Feed-forward inner dimension")
-    n_layers: int = Field(..., description="Number of Transformer blocks")
-    batch: int = Field(..., description="Batch size per rank")
-    T: int = Field(..., description="Sequence length")
-    steps: int = Field(..., description="Steps per validation epoch")
-    lr: float = Field(..., description="Learning rate")
-    wd: float = Field(..., description="Weight decay")
-
-    sync_collectives: bool = Field(False, description="Disable overlap: run AG/RS synchronously")
-
-    class Config:
-        extra = "ignore"
+class ModelType(str, Enum):
+    POC = "poc"  # Fast run, visible overlap
+    GIANT = "giant"  # Massive compute, overlap is critical
 
 
-class CPUSetup(BaseSetup):
-    """
-    Small config for CPU or single-GPU debugging.
-    """
+class Setup(BaseSettings):
+    model_type: ModelType = ModelType.POC
 
-    in_dim: int = 128
-    dim: int = 256
-    n_heads: int = 8
-    ff_dim: int = 1024
-    n_layers: int = 4
-    batch: int = 4
-    T: int = 64
-    steps: int = 50
-    lr: float = 1e-3
-    wd: float = 0.0
-
-
-class CloudSetup(BaseSetup):
-    """
-    'Fat' configuration which makes communication heavy enough
-    to expose compute/comm overlap on multi-GPU A100/H100.
-    """
-
-    in_dim: int = 2048
+    # Architecture
+    in_dim: int = 4096
     dim: int = 4096
     n_heads: int = 32
-    ff_dim: int = 16384
-    n_layers: int = 8
+    ff_dim: int = 11008
+    n_layers: int = 12
+
+    # Training
     batch: int = 4
-    T: int = 256
-    steps: int = 100
-    lr: float = 1e-3
-    wd: float = 0.0
+    T: int = 1024
+    steps: int = 10
+    lr: float = 1e-4
 
-
-class Logs(BaseSettings):
-    dir: str = Field("logs")
-    level: str = Field("INFO")
+    # FSDP Flags
+    overlap: bool = True
 
 
 class Profiler(BaseSettings):
-    n_steps: int = Field(8)
+    n_steps: int = 4
 
 
-# -----------------------------
-#       Unified Config
-# -----------------------------
 class Config(BaseSettings):
-    """
-    Top-level unified config object.
-    Access like cfg.cpu or cfg.cloud.
-    """
-
-    cpu: CPUSetup = CPUSetup()
-    cloud: CloudSetup = CloudSetup()
-    logs: Logs = Logs()
+    train: Setup = Setup()
+    logs_dir: str = "logs"
     profiler: Profiler = Profiler()
 
     class Config:
         extra = "ignore"
 
 
+def get_model_config(mode: ModelType) -> Setup:
+    """
+    Factory to produce consistent model configs.
+    """
+    if mode == ModelType.POC:
+        # Balanced Compute/Comm to verify overlap mechanics
+        return Setup(
+            model_type=ModelType.POC,
+            in_dim=2048,
+            dim=2048,
+            n_heads=16,
+            ff_dim=8192,
+            n_layers=8,
+            batch=4,
+            T=512,
+            overlap=True,
+        )
+    elif mode == ModelType.GIANT:
+        # Heavy Compute dominance. Simulates 70B+ layer widths.
+        return Setup(
+            model_type=ModelType.GIANT,
+            in_dim=8192,
+            dim=8192,
+            n_heads=64,
+            ff_dim=28672,
+            n_layers=16,
+            batch=1,
+            T=1024,
+            overlap=True,
+        )
+    return Setup()
+
+
 @functools.lru_cache
 def get_cfg() -> Config:
-    """
-    Cached singleton config instance.
-    Imported everywhere to avoid reallocation.
-    """
+    if "RANK" not in os.environ:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = "29500"
+        os.environ["WORLD_SIZE"] = str(torch.cuda.device_count())
+        os.environ["RANK"] = "0"
 
-    world_size = torch.cuda.device_count()
-
-    # ------------------------------------------------------------------
-    # For mp.spawn + env://, we MUST set MASTER_ADDR/MASTER_PORT manually.
-    # torchrun usually does this, but Jupyter notebook does NOT.
-    # ------------------------------------------------------------------
     cfg = Config()
-    logger.info("################################################")
-    logger.info("Starting FSDP experiments")
-    logger.info("We will train a tiny tranformer model with SYNC & ASYNC compute/comm with FSDP")
-    logger.info("Then, the GPU profiling traces can be compared via Perfetto UI")
-    logger.info("P.S. By default, the flash attn module will be imported")
-    logger.info("If not available, there is a fallback for usual torch attention")
-    logger.debug(f"Setting env for torch multiprocessing for world_size: {world_size}")
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
-    logger.debug(f"Env addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}")
-
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    logger.info(f"Logger level: {cfg.logs.level}")
-    logger.debug("################################################")
-
     return cfg

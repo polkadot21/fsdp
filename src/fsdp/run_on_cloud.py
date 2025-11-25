@@ -1,72 +1,33 @@
 import os
 
-import torch
 import torch.multiprocessing as mp
 from loguru import logger
 
-from fsdp import exceptions
-from fsdp.config import Config, get_cfg
-from fsdp.dist_utils import ddp_cleanup, ddp_init
-from fsdp.train_loop import train_one_rank
+from fsdp.config import ModelType, get_cfg, get_model_config
+from fsdp.train_loop import train_worker
 
 
-def _worker(rank: int, world_size: int, cfg: Config, sync_mode: bool) -> None:
-    """
-    Child worker. Must set rank-specific env vars **before** ddp_init().
-    """
+def main():
+    base_cfg = get_cfg()
+    world_size = int(os.environ["WORLD_SIZE"])
 
-    # ---- Required for torch.distributed.init_process_group(init_method="env://") ----
-    logger.debug(f"Setting env for rank: {rank}")
-    os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    msg = f"Env: {os.environ['RANK']}, local rank: {os.environ['LOCAL_RANK']}"
-    logger.debug(msg)
-    logger.debug("################################################")
-
-    logger.debug(
-        f"[worker {rank}] torch.cuda.is_available={torch.cuda.is_available()}, "
-        f"device_count={torch.cuda.device_count()}"
-    )
-    ddp_init(rank, world_size)
-    try:
-        data_cfg = cfg.cloud
-        data_cfg.sync_collectives = sync_mode
-        outdir = f"{cfg.logs.dir}_{'sync' if sync_mode else 'async'}"
-        train_one_rank(cfg.cloud, logdir=outdir, profile_steps=cfg.profiler.n_steps)
-    finally:
-        ddp_cleanup()
-
-
-def run_on_cloud() -> None:
-    """
-    Jupyter-friendly:
-    - Auto-select world_size based on available GPUs
-    - Uses mp.spawn for multi-GPU.
-    """
-
-    if not torch.cuda.is_available():
-        err_msg = f"CUDA available: {torch.cuda.is_available()}"
-        logger.error(err_msg)
-        raise exceptions.CudaNotFoundError(err_msg)
-
-    world_size = torch.cuda.device_count()
     if world_size < 2:
-        err_msg = f"For FSDP two or more GPUs required, current count: {world_size}"
-        logger.error(err_msg)
-        raise exceptions.NotEnoughGpuError(err_msg)
+        logger.error("FSDP requires at least 2 GPUs.")
+        return
 
-    logger.info(f"Launching experiment with {world_size} GPUs")
+    # Choose mode here.
+    # For the user demo, we run the GIANT mode to prove the point.
+    mode = ModelType.GIANT
 
-    cfg = get_cfg()
-    # ------------------------------------------------------------------
-    # Multi-GPU case
-    # ------------------------------------------------------------------
-    logger.info("Spawning distributed workers...")
-    logger.info("\n##### Running SYNC baseline (no overlap) #####\n")
-    mp.spawn(_worker, args=(world_size, cfg, True), nprocs=world_size)
+    logger.info(f"Launching FSDP Experiment. Mode: {mode}")
 
-    logger.info("\n##### Running ASYNC overlapped FSDP #####\n")
-    mp.spawn(_worker, args=(world_size, cfg, False), nprocs=world_size)
+    cfg = base_cfg.model_copy()
+    cfg.train = get_model_config(mode)
+    cfg.logs_dir = f"logs/{mode.value}"
+    os.makedirs(cfg.logs_dir, exist_ok=True)
 
-    logger.info("Experiments complete!")
+    mp.spawn(train_worker, args=(world_size, cfg), nprocs=world_size)
+
+
+if __name__ == "__main__":
+    main()
