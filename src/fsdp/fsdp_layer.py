@@ -194,17 +194,19 @@ class FSDPLayer(nn.Module):
         for i, (p, numel, shape) in enumerate(
             zip(self.params, self.param_numels, self.param_shapes, strict=False)
         ):
+            fsdp_tag = (self.block_idx, i)
             # Create the view
             v = full_params[offset : offset + numel].view(shape)
 
             # Tag the VIEW itself because this is what Autograd sees
-            v._fsdp_tag = (self.block_idx, i)
+            v._fsdp_tag = fsdp_tag
 
             # Assign to parameter
             p.data = v
 
             # Tag the Parameter object (belt and suspenders)
-            p._fsdp_tag = (self.block_idx, i)
+            p._fsdp_tag = fsdp_tag
+            self.log.debug(f"Materialize: tagged v and p with {fsdp_tag}")
 
             offset += numel
 
