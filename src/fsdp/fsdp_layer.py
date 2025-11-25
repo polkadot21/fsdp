@@ -117,21 +117,33 @@ class FSDPLayer(nn.Module):
 
         if isinstance(packed, tuple) and len(packed) == 2:
             block_idx, param_idx = packed
-            self.log.debug(f"Searching for param in block: {block_idx}, with id: {param_idx}")
-            # 1. Resurrect data (this refreshes pointers)
+
+            # 1. Resurrect (Refills p.data)
             self._materialize()
 
-            # 2. Return the requested parameter
+            # 2. Retrieve the Parameter wrapper
             p = self.params[param_idx]
 
-            self.log.debug(f"Found param in block: {block_idx}, with id: {param_idx}")
+            # 3. VERBOSE LOGGING
+            # We check if the Wrapper (p) matches the Data (p.data)
+            # If p.numel() is 0 but p.data.numel() is 8192, we found the bug.
+            self.log.debug(
+                f"Unpack: Block {block_idx} Param {param_idx} | "
+                f"P_ID: {id(p)} P_Size: {p.numel()} | "
+                f"D_ID: {id(p.data)} D_Size: {p.data.numel()} | "
+                f"Shape: {p.shape}"
+            )
 
-            # 3. Sanity Check
-            if p.numel() == 0:
-                raise RuntimeError(
-                    f"Layer {self.block_idx} Param {param_idx} is EMPTY in unpack_hook!"
-                )
-            return p
+            # 4. Sanity Check
+            if p.data.numel() == 0:
+                msg = f"FATAL: Param {param_idx} DATA is empty! Materialize failed."
+                self.log.critical(msg)
+                raise RuntimeError(msg)
+
+            # 5. Return p.data (The View), NOT p (The Wrapper)
+            # Autograd needs the dense tensor. If we return 'p' and it has cached
+            # metadata saying "I am size 0" from the forward pass, we crash.
+            return p.data
 
         return packed
 
