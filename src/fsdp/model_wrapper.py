@@ -63,3 +63,13 @@ class FSDPWrapper(nn.Module):
         # However, we can use the `register_full_backward_hook` on Layer i to trigger prefetch for i-1. # noqa
         # We inject a callback into the layers now that we have the list.
         return out
+
+    def wait_for_post_backward(self):
+        """
+        Explicit barrier.
+        Ensures Compute Stream waits for all Comm Stream tasks (ReduceScatter) to finish.
+        Must be called before Optimizer Step.
+        """
+        # We can just use the stream manager from the first layer
+        # (All layers share the same stream manager reference)
+        self.layers[0].streams.wait_comm()

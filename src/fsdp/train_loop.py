@@ -112,7 +112,10 @@ def train_worker(rank, world_size, cfg):
                 loss.backward()
 
                 # --- C. OPTIMIZER ---
-                # logger.debug(f"Step {s} | Phase: Optimizer Step")
+                logger.debug(f"Step {s} | Phase: Optimizer Step")
+                if cfg.train.overlap:
+                    model.wait_for_post_backward()
+
                 optimizer.step()
                 optimizer.zero_grad()
 
