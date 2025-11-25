@@ -55,7 +55,14 @@ class FSDPLayer(nn.Module):
         self.params = [p for n, p in sorted(self.module.named_parameters())]
 
         # ---------------------------------------------------------------------
-        # 2. Flatten & Shard
+        # 2. Dynamic ID Map
+        # ---------------------------------------------------------------------
+        # We will update this every step because 'view' objects change identity.
+        # Maps id(tensor_obj) -> (block_idx, param_idx)
+        self._tensor_id_to_index = {}
+
+        # ---------------------------------------------------------------------
+        # 3. Flatten & Shard
         # ---------------------------------------------------------------------
         flat_params = [p.detach().reshape(-1) for p in self.params]
         full_flat = torch.cat(flat_params)
@@ -77,13 +84,13 @@ class FSDPLayer(nn.Module):
         self.shard = nn.Parameter(my_slice)
 
         # ---------------------------------------------------------------------
-        # 3. Metadata
+        # 4. Metadata
         # ---------------------------------------------------------------------
         self.param_shapes = [p.shape for p in self.params]
         self.param_numels = [p.numel() for p in self.params]
 
         # ---------------------------------------------------------------------
-        # 4. Free Original Parameters (The "Emptying")
+        # 5. Free Original Parameters (The "Emptying")
         # ---------------------------------------------------------------------
         for p in self.params:
             p.data = torch.empty(0)
@@ -98,30 +105,34 @@ class FSDPLayer(nn.Module):
     # =========================================================================
     def _pack_hook(self, tensor):
         self.log.debug("_pack_hook called for tensor")
-        if hasattr(tensor, "_fsdp_tag"):
-            self.log.debug(f"_pack_hook found tag: {tensor._fsdp_tag}")
-            return tensor._fsdp_tag
+        t_id = id(tensor)
+        if t_id in self._tensor_id_to_index:
+            self.log.debug(f"_pack_hook found ID: {t_id}")
+            return self._tensor_id_to_index[t_id]
+        logger.debug("If not in map, it's an activation/input, save as is.")
         return tensor
 
     def _unpack_hook(self, packed):
         self.log.debug("_unpack_hook called for params")
 
         if isinstance(packed, tuple) and len(packed) == 2:
-            # 1. Resurrect
+            block_idx, param_idx = packed
+            self.log.debug(f"Searching for param in block: {block_idx}, with id: {param_idx}")
+            # 1. Resurrect data (this refreshes pointers)
             self._materialize()
 
-            # 2. Retrieve
-            block_idx, param_idx = packed
-            self.log.debug(f"_unpack_hook called for block: {block_idx}, param {param_idx}")
-
+            # 2. Return the requested parameter
             p = self.params[param_idx]
 
-            # 3. Verify
-            if p.numel() == 0:
-                self.log.critical(f"FATAL: Param {param_idx} is EMPTY in unpack_hook!")
-                raise RuntimeError("Parameter failed to materialize!")
+            self.log.debug(f"Found param in block: {block_idx}, with id: {param_idx}")
 
+            # 3. Sanity Check
+            if p.numel() == 0:
+                raise RuntimeError(
+                    f"Layer {self.block_idx} Param {param_idx} is EMPTY in unpack_hook!"
+                )
             return p
+
         return packed
 
     # =========================================================================
@@ -188,25 +199,26 @@ class FSDPLayer(nn.Module):
                 group=self.group,
             )
 
+        # REFRESH POINTERS AND ID MAP
+        # We must clear the map because old view objects from previous steps are dead/unsafe
+        self._tensor_id_to_index.clear()
+
         # 2. Pointer Arithmetic (Resurrection)
         full_params = self.bufpool.get_buffer(self.block_idx)
         offset = 0
         for i, (p, numel, shape) in enumerate(
             zip(self.params, self.param_numels, self.param_shapes, strict=False)
         ):
-            fsdp_tag = (self.block_idx, i)
-            # Create the view
+            # Create View
             v = full_params[offset : offset + numel].view(shape)
-
-            # Tag the VIEW itself because this is what Autograd sees
-            v._fsdp_tag = fsdp_tag
-
-            # Assign to parameter
             p.data = v
 
-            # Tag the Parameter object (belt and suspenders)
-            p._fsdp_tag = fsdp_tag
-            self.log.debug(f"Materialize: tagged v and p with {fsdp_tag}")
+            # REGISTER BOTH PARAMETER AND VIEW IDs
+            # This catches both cases (Autograd saving 'p' or 'p.data')
+            self.log.debug(f"Materialize: Caching p with ID: {id(p)}: {(self.block_idx, i)}")
+            self._tensor_id_to_index[id(p)] = (self.block_idx, i)
+            self.log.debug(f"Materialize: Caching v with ID: {id(v)}: {(self.block_idx, i)}")
+            self._tensor_id_to_index[id(v)] = (self.block_idx, i)
 
             offset += numel
 
@@ -227,6 +239,7 @@ class FSDPLayer(nn.Module):
         for p in self.params:
             p.data = torch.empty(0)
 
+        self._tensor_id_to_index.clear()
         self._is_materialized = False
 
     # =========================================================================
