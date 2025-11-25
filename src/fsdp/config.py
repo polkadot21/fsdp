@@ -60,13 +60,13 @@ def get_model_config(mode: ModelType, overlap: bool = True) -> Setup:
     elif mode == ModelType.GIANT:
         return Setup(
             model_type=ModelType.GIANT,
-            in_dim=8192,
-            dim=8192,
-            n_heads=64,
-            ff_dim=28672,
-            n_layers=16,
-            batch=1,
-            T=1024,
+            in_dim=8192,  # Huge params (Comm)
+            dim=8192,  # Huge params
+            n_heads=32,
+            ff_dim=32768,  # Massive MLP weights
+            n_layers=4,  # Few layers (less total VRAM)
+            batch=1,  # Minimal Compute
+            T=128,  # Minimal Compute
             overlap=overlap,
         )
     return Setup()
