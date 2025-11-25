@@ -103,14 +103,17 @@ class FSDPLayer(nn.Module):
     #  Autograd Hooks
     # =========================================================================
     def _pack_hook(self, tensor):
+        self.log.debug(f"_pack_hook called for tensor {id(tensor)}")
         idx = self.param_id_to_index.get(id(tensor), None)
         if idx is not None:
             return (self.block_idx, idx)
         return tensor
 
     def _unpack_hook(self, packed):
+        self.log.debug("_unpack_hook called for params")
+
         if isinstance(packed, tuple) and len(packed) == 2:
-            # self.log.trace(f"_unpack_hook called for param {packed[1]}")
+            self.log.debug(f"_unpack_hook called for param {packed[1]}")
 
             # 1. Resurrect
             self._materialize()
