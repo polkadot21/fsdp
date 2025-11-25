@@ -52,8 +52,9 @@ class FSDPLayer(nn.Module):
         # 1. Deterministic Parameter Order
         # ---------------------------------------------------------------------
         # CRITICAL: We strictly sort parameters by name.
-        self.params = [p for n, p in sorted(self.module.named_parameters())]
-
+        named_sorted = sorted(self.module.named_parameters())
+        self.params = [p for n, p in named_sorted]
+        self.param_names = [n for n, p in named_sorted]
         # ---------------------------------------------------------------------
         # 2. Dynamic ID Map
         # ---------------------------------------------------------------------
@@ -104,12 +105,35 @@ class FSDPLayer(nn.Module):
     #  Autograd Hooks
     # =========================================================================
     def _pack_hook(self, tensor):
-        self.log.debug("_pack_hook called for tensor")
+        # 1. Fast Path: ID Lookup
         t_id = id(tensor)
         if t_id in self._tensor_id_to_index:
-            self.log.debug(f"_pack_hook found ID: {t_id}")
-            return self._tensor_id_to_index[t_id]
-        logger.debug("If not in map, it's an activation/input, save as is.")
+            block, idx = self._tensor_id_to_index[t_id]
+            name = self.param_names[idx]
+            self.log.debug(f"PackHook: ID Hit for {name} (ID: {t_id})")
+            return (block, idx)
+
+        # 2. Robust Path: Storage Check (The "Catch-All" Fix)
+        # If 'tensor' is a view of our buffer but has a different object ID (e.g. created by PyTorch internals), # noqa
+        # we can identify it by its memory address (data_ptr).
+        if self._is_materialized:
+            # Check if tensor lives in our buffer
+            buffer_storage = self.bufpool.get_buffer(self.block_idx).storage()
+
+            # Compare storage pointers (fastest check)
+            if tensor.storage().data_ptr() == buffer_storage.data_ptr():
+                ptr = tensor.data_ptr()
+
+                # Scan params to find which one matches this data pointer
+                # (N is small, usually < 16, so this loop is cheap)
+                for i, p in enumerate(self.params):
+                    if p.data_ptr() == ptr:
+                        name = self.param_names[i]
+                        self.log.debug(f"PackHook: Storage Rescue! ID miss but recovered {name}")
+                        return (self.block_idx, i)
+
+        # If we reach here, it's genuinely an activation or input (not a weight)
+        self.log.debug("PackHook: Passed through (Activation/Input)")
         return tensor
 
     def _unpack_hook(self, packed):
@@ -123,12 +147,13 @@ class FSDPLayer(nn.Module):
 
             # 2. Retrieve the Parameter wrapper
             p = self.params[param_idx]
+            name = self.param_names[param_idx]
 
             # 3. VERBOSE LOGGING
             # We check if the Wrapper (p) matches the Data (p.data)
             # If p.numel() is 0 but p.data.numel() is 8192, we found the bug.
             self.log.debug(
-                f"Unpack: Block {block_idx} Param {param_idx} | "
+                f"Unpack: Name: {name} Block {block_idx} Param {param_idx} | "
                 f"P_ID: {id(p)} P_Size: {p.numel()} | "
                 f"D_ID: {id(p.data)} D_Size: {p.data.numel()} | "
                 f"Shape: {p.shape}"
@@ -136,7 +161,7 @@ class FSDPLayer(nn.Module):
 
             # 4. Sanity Check
             if p.data.numel() == 0:
-                msg = f"FATAL: Param {param_idx} DATA is empty! Materialize failed."
+                msg = f"FATAL: Name: {name} Param {param_idx} DATA is empty! Materialize failed."
                 self.log.critical(msg)
                 raise RuntimeError(msg)
 
@@ -218,8 +243,8 @@ class FSDPLayer(nn.Module):
         # 2. Pointer Arithmetic (Resurrection)
         full_params = self.bufpool.get_buffer(self.block_idx)
         offset = 0
-        for i, (p, numel, shape) in enumerate(
-            zip(self.params, self.param_numels, self.param_shapes, strict=False)
+        for i, (p, name, numel, shape) in enumerate(
+            zip(self.params, self.param_names, self.param_numels, self.param_shapes, strict=False)
         ):
             # Create View
             v = full_params[offset : offset + numel].view(shape)
@@ -227,10 +252,16 @@ class FSDPLayer(nn.Module):
 
             # REGISTER BOTH PARAMETER AND VIEW IDs
             # This catches both cases (Autograd saving 'p' or 'p.data')
-            self.log.debug(f"Materialize: Caching p with ID: {id(p)}: {(self.block_idx, i)}")
+            self.log.debug(
+                f"Materialize: Caching p with {name} with ID: {id(p)}: {(self.block_idx, i)}"
+            )
             self._tensor_id_to_index[id(p)] = (self.block_idx, i)
-            self.log.debug(f"Materialize: Caching v with ID: {id(v)}: {(self.block_idx, i)}")
+            self.log.debug(
+                f"Materialize: Caching v with {name} with ID: {id(v)}: {(self.block_idx, i)}"
+            )
             self._tensor_id_to_index[id(v)] = (self.block_idx, i)
+
+            self.log.debug(f"Materialized {name} | Shape: {shape}")
 
             offset += numel
 
