@@ -110,10 +110,23 @@ class FSDPLayer(nn.Module):
 
     def _unpack_hook(self, packed):
         if isinstance(packed, tuple) and len(packed) == 2:
-            # If Autograd asks for data during backward, we must ensure it's there.
-            # This handles cases where prefetch_backward might have been skipped or mistimed.
+            # self.log.trace(f"_unpack_hook called for param {packed[1]}")
+
+            # 1. Resurrect
             self._materialize()
-            return self.params[packed[1]]
+
+            # 2. Retrieve
+            p = self.params[packed[1]]
+
+            # 3. PARANOID CHECK: Did it work?
+            if p.numel() == 0:
+                self.log.critical(f"FATAL: Param {packed[1]} is EMPTY inside unpack_hook!")
+                self.log.critical(f"State: is_materialized={self._is_materialized}")
+                raise RuntimeError(
+                    f"Layer {self.block_idx} Param {packed[1]} failed to materialize!"
+                )
+
+            return p
         return packed
 
     # =========================================================================
