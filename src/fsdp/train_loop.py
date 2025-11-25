@@ -8,27 +8,16 @@ from fsdp.model_wrapper import FSDPWrapper
 
 
 def link_backward_prefetching(model: FSDPWrapper):
-    """
-    Links layer[i] backward hook to layer[i-1].prefetch_backward().
-    This creates the daisy-chain for overlap in the backward pass.
-    """
     layers = model.layers
-
-    def get_hook(prev_layer_idx):
-        def hook(module, gin, gout):
-            if prev_layer_idx >= 0:
-                # Debug log for overlap chain
-                # logger.trace(f"Backward Hook Layer {prev_layer_idx+1} -> Prefetch Layer {prev_layer_idx}") # noqa
-                layers[prev_layer_idx].prefetch_backward()
-
-        return hook
-
-    # Layer i finishing backward -> Trigger prefetch for i-1
     for i in range(len(layers)):
-        # We register on the module itself
-        layers[i].register_full_backward_hook(get_hook(i - 1))
+        # If I am Layer i, I want to trigger prefetch for Layer i-1
+        if i > 0:
+            # Define the trigger
+            def trigger(prev_idx=i - 1):
+                layers[prev_idx].prefetch_backward()
 
-    logger.debug("Backward prefetching hooks linked.")
+            # Register it on Layer i
+            layers[i].set_backward_prefetch_trigger(trigger)
 
 
 def train_worker(rank, world_size, cfg):
