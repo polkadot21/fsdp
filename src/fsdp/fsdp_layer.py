@@ -57,8 +57,8 @@ class FSDPLayer(nn.Module):
         # ---------------------------------------------------------------------
         # 2. Map for Hooks
         # ---------------------------------------------------------------------
-        # id(tensor) -> index in self.params list
-        self.param_id_to_index = {id(p): i for i, p in enumerate(self.params)}
+        for i, p in enumerate(self.params):
+            p._fsdp_tag = (self.block_idx, i)
 
         # ---------------------------------------------------------------------
         # 3. Flatten & Shard
@@ -103,31 +103,29 @@ class FSDPLayer(nn.Module):
     #  Autograd Hooks
     # =========================================================================
     def _pack_hook(self, tensor):
-        self.log.debug(f"_pack_hook called for tensor {id(tensor)}")
-        idx = self.param_id_to_index.get(id(tensor), None)
-        if idx is not None:
-            return (self.block_idx, idx)
+        self.log.debug("_pack_hook called for tensor")
+        if hasattr(tensor, "_fsdp_tag"):
+            self.log.debug(f"_pack_hook found tag: {tensor._fsdp_tag}")
+            return tensor._fsdp_tag
         return tensor
 
     def _unpack_hook(self, packed):
         self.log.debug("_unpack_hook called for params")
 
         if isinstance(packed, tuple) and len(packed) == 2:
-            self.log.debug(f"_unpack_hook called for param {packed[1]}")
-
             # 1. Resurrect
             self._materialize()
 
             # 2. Retrieve
-            p = self.params[packed[1]]
+            block_idx, param_idx = packed
+            self.log.debug(f"_unpack_hook called for block: {block_idx}, param {param_idx}")
 
-            # 3. PARANOID CHECK: Did it work?
+            p = self.params[param_idx]
+
+            # 3. Verify
             if p.numel() == 0:
-                self.log.critical(f"FATAL: Param {packed[1]} is EMPTY inside unpack_hook!")
-                self.log.critical(f"State: is_materialized={self._is_materialized}")
-                raise RuntimeError(
-                    f"Layer {self.block_idx} Param {packed[1]} failed to materialize!"
-                )
+                self.log.critical(f"FATAL: Param {param_idx} is EMPTY in unpack_hook!")
+                raise RuntimeError("Parameter failed to materialize!")
 
             return p
         return packed
