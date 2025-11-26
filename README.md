@@ -53,3 +53,27 @@ run_on_cloud(mode="poc")
 
 # Run the heavy simulation (Checks OOM safety & massive throughput)
 # run_on_cloud(mode="giant")
+```
+
+### CLI / Makefile
+
+```bash
+make test-real-model
+```
+
+### Profiling Results
+
+![Async profiling](assets/async_profiling.png)
+
+The trace above demonstrates Perfect Compute Utilization using `Overlap: True`.
+
+- Top Row (Compute Stream).
+
+- Bottom Row (Comm Stream): AllGather (Forward/Backward) and ReduceScatter happen entirely in the background.
+
+
+## **📚 Sources & References**
+- **YaFSDP**
+- PyTorch FSDP RFCs
+- DeepSpeed ZeRO Stage-3 implementation notes
+- NVIDIA NCCL collective performance docs
