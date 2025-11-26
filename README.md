@@ -1,109 +1,55 @@
 
-# FSDP with Asynchronous Overlap for Compute and Communication
+# FSDP with YaFSDP-Style Asynchronous Overlap
 
 ### **📌 Summary**
-This repository explores a custom manual implementation of Fully Sharded Data Parallel (FSDP) with **asynchronous communication overlap**, inspired by **YaFSDP (Yet Another FSDP)**.
-The goal is to validate whether manually controlling **all_gather + reduce_scatter overlap** provides measurable benefits over standard synchronous FSDP execution.
+This repository implements a **manual Fully Sharded Data Parallel (FSDP)** training loop from scratch. It explicitly manages CUDA streams to achieve **perfect computation-communication overlap**, following the architectural principles of **YaFSDP**.
 
-We compare:
-- **SYNC Mode** — communication blocks compute (baseline)
-- **ASYNC Mode** — communication overlaps with compute via asynchronous collectives and event chaining
+Unlike standard FSDP wrappers, this implementation exposes the raw mechanics of distributed training, offering a "clean room" environment to study:
+- **Bidirectional Pipelining:** Fetching the *next* layer's weights while computing the *current* layer.
+- **Memory Safety:** Solving complex PyTorch Autograd lifecycle issues (Tensor ID reuse collisions and stale pointers).
+- **Graph Topology Control:** Using `GateGradFlow` to enforce strict ordering between gradient calculation and reduction, preventing race conditions.
 
 ---
 
-## **🎯 Motivation**
-Traditional FSDP performs:
-1. Forward → all_gather full params
-2. Backward → reduce_scatter gradients
-3. Optimizer step
+## **🎯 Architecture & Key Features**
 
-YaFSDP demonstrated that:
-> **Launching all_gather and reduce_scatter asynchronously and overlapping them reduces exposed communication time.**
+This implementation goes beyond simple async handles. It builds a custom engine to handle the delicate dance between the **Compute Stream** and the **Communication Stream**.
 
-This repo reimplements the mechanism manually to:
-- verify correctness
-- visualize overlap explicitly via profiler traces
-- understand implementation mechanics deeply
-- replicate YaFSDP-style performance plots
-
-**Key techniques used:**
-| Feature | Method |
-|--------|--------|
-| Param rematerialization | All-gather into buffer + *views* (no copies) |
-| Async backward overlap | reduce_scatter launched in backward hook |
-| Event-driven dependency | Streams + async work handles |
-| Two-buffer pool | Double-buffering to pipeline next forward params |
+| Feature | Implementation Detail |
+|--------|-----------------------|
+| **Static Memory Pool** | Fixed-size "Ping-Pong" buffers (Pre-allocated). Zero memory fragmentation/reallocation during training. |
+| **GateGradFlow** | A custom `autograd.Function` "fence" that guarantees weight gradients are fully computed *before* `ReduceScatter` launches. |
+| **Storage Rescue** | Advanced Autograd hooks that survive Python Garbage Collection and Tensor ID reuse (the "Stale Pointer" bugs). |
+| **Stream Pipelining** | Explicit `cuda.Event` synchronization to ensure Compute never waits for Communication (unless bandwidth bound). |
+| **Zero-Copy** | Parameters are materialized as *views* into the global buffer, avoiding expensive `memcpy`. |
+| **Pre-Backward Trigger**| A `register_full_backward_pre_hook` that launches the `AllGather` for layer `N-1` immediately when layer `N` starts its backward pass. |
 
 ---
 
 ## **🧪 Experiment Setup**
 
 ### **Hardware**
-- 2× NVIDIA GPUs (tested on H100 80Gb)
+- Minimum 2× NVIDIA GPUs (Tested on H100 80GB)
+- Interconnect: NVLink or high-speed TCP/IB
 
 ### **Software**
-- PyTorch Distributed + NCCL backend
-- Chrome trace export + Perfetto UI
-
-### **Model**
-A multi-block custom MLP, each block wrapped in manual FSDP shard logic.
+- **PyTorch Distributed** (NCCL Backend)
+- **Chrome Tracing** (via `torch.profiler`)
+- **UV** (Modern Python dependency management)
 
 ---
 
 ## **📂 Execution**
 
-### Disclaimer!
-*Works only on GPU. World size (the number of GPUs) is at least 2.*
+The entry point is flexible, allowing you to run a fast "Proof of Concept" (PoC) to verify overlap, or a massive "Giant" simulation to stress test memory.
 
-
-### Run both experiments:
+### **Python / Jupyter API**
 
 ```python
 from fsdp import run_on_cloud
-run_on_cloud()
-```
-Visualize the results by uploading to Perfetto UI.
 
----
+# Run the fast verification (Checks overlap & convergence)
+run_on_cloud(mode="poc")
 
-## **📸 Traces (Perfetto UI Screenshots)**
-
-### **🔹 SYNC — Baseline FSDP (No Overlap)**
-
-![Sync profiling](assets/sync_profiling.png)
-
----
-
-### **🔹 ASYNC — Overlapped FSDP (Manual Implementation)**
-
-![Async profiling](assets/async_profiling.png)
-
----
-
-## **📊 Interpretation**
-
-| Metric | SYNC | ASYNC | Difference |
-|--------|------|-------|------------|
-| Total Step Time | ~256ms | ~244ms | ~5% faster |
-
-
-
-To see meaningful difference, we would need:
-- **wider model (more parameters)**
-- or **lighter compute kernels**
-- or **more GPUs → larger collective latency**
-
----
-
-## **🧠 Key Takeaways**
-
-✔ Our implementation successfully overlaps RS and AG via hooks
-✔ Memory is efficiently handled using **views** rather than copies
-
----
-
-## **📚 Sources & References**
-- **YaFSDP**
-- PyTorch FSDP RFCs
-- DeepSpeed ZeRO Stage-3 implementation notes
-- NVIDIA NCCL collective performance docs
+# Run the heavy simulation (Checks OOM safety & massive throughput)
+# run_on_cloud(mode="giant")
