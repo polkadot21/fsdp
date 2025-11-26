@@ -4,69 +4,56 @@ import torch
 import torch.multiprocessing as mp
 from loguru import logger
 
-from fsdp import exceptions
-from fsdp.config import Config, get_cfg
-from fsdp.dist_utils import ddp_cleanup, ddp_init
-from fsdp.train_loop import train_one_rank
+from fsdp.config import ModelType, get_cfg, get_model_config
+from fsdp.train_loop import train_worker
 
 
-def _worker(rank: int, world_size: int, cfg: Config, sync_mode: bool) -> None:
+def run_on_cloud(mode: str | ModelType = "poc", overlap: bool = True):
     """
-    Child worker. Must set rank-specific env vars **before** ddp_init().
+    Main entry point for running FSDP experiments.
+    Can be called from CLI or Jupyter Notebook.
+
+    Args:
+        mode: "poc" (fast, overlap check) or "giant" (compute heavy).
+              Defaults to "poc" for safer quick testing.
     """
+    # 1. Handle Mode Selection (String -> Enum)
+    if isinstance(mode, str):
+        try:
+            # Normalize string input (e.g., "POC" -> ModelType.POC)
+            mode = ModelType(mode.lower())
+        except ValueError:
+            valid_modes = [m.value for m in ModelType]
+            logger.error(f"Invalid mode: '{mode}'. Valid options: {valid_modes}")
+            return
 
-    # ---- Required for torch.distributed.init_process_group(init_method="env://") ----
-    logger.debug(f"Setting env for rank: {rank}")
-    os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    msg = f"Env: {os.environ['RANK']}, local rank: {os.environ['LOCAL_RANK']}"
-    logger.debug(msg)
-    logger.debug("################################################")
+    # 2. Setup Environment & Config
+    # get_cfg() has a side-effect: it sets MASTER_ADDR/PORT/WORLD_SIZE
+    # if they are missing (crucial for Jupyter).
+    base_cfg = get_cfg()
 
-    logger.debug(
-        f"[worker {rank}] torch.cuda.is_available={torch.cuda.is_available()}, "
-        f"device_count={torch.cuda.device_count()}"
-    )
-    ddp_init(rank, world_size)
-    try:
-        data_cfg = cfg.cloud
-        data_cfg.sync_collectives = sync_mode
-        outdir = f"{cfg.logs.dir}_{'sync' if sync_mode else 'async'}"
-        train_one_rank(cfg.cloud, logdir=outdir, profile_steps=cfg.profiler.n_steps)
-    finally:
-        ddp_cleanup()
+    # Robust World Size Detection
+    if "WORLD_SIZE" in os.environ:
+        world_size = int(os.environ["WORLD_SIZE"])
+    else:
+        # Fallback for Jupyter if get_cfg didn't set it (safety net)
+        world_size = torch.cuda.device_count()
 
-
-def run_on_cloud() -> None:
-    """
-    Jupyter-friendly:
-    - Auto-select world_size based on available GPUs
-    - Uses mp.spawn for multi-GPU.
-    """
-
-    if not torch.cuda.is_available():
-        err_msg = f"CUDA available: {torch.cuda.is_available()}"
-        logger.error(err_msg)
-        raise exceptions.CudaNotFoundError(err_msg)
-
-    world_size = torch.cuda.device_count()
     if world_size < 2:
-        err_msg = f"For FSDP two or more GPUs required, current count: {world_size}"
-        logger.error(err_msg)
-        raise exceptions.NotEnoughGpuError(err_msg)
+        logger.error(f"FSDP requires at least 2 GPUs. Found: {world_size}")
+        logger.warning("If you are testing on CPU, run 'make test' instead.")
+        return
 
-    logger.info(f"Launching experiment with {world_size} GPUs")
+    logger.info(
+        f"Launching FSDP Experiment on {world_size} GPUs. Mode: {mode.value.upper()}, Overlap: {overlap}"  # noqa
+    )
 
-    cfg = get_cfg()
-    # ------------------------------------------------------------------
-    # Multi-GPU case
-    # ------------------------------------------------------------------
-    logger.info("Spawning distributed workers...")
-    logger.info("\n##### Running SYNC baseline (no overlap) #####\n")
-    mp.spawn(_worker, args=(world_size, cfg, True), nprocs=world_size)
+    # 3. Prepare Config
+    cfg = base_cfg.model_copy()
+    cfg.train = get_model_config(mode, overlap)
+    cfg.logs_dir = f"logs/{mode.value}"
+    os.makedirs(cfg.logs_dir, exist_ok=True)
 
-    logger.info("\n##### Running ASYNC overlapped FSDP #####\n")
-    mp.spawn(_worker, args=(world_size, cfg, False), nprocs=world_size)
-
-    logger.info("Experiments complete!")
+    # 4. Spawn Workers
+    # nprocs=world_size spawns one process per GPU
+    mp.spawn(train_worker, args=(world_size, cfg), nprocs=world_size)
