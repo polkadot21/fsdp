@@ -8,6 +8,11 @@ from fsdp.model_wrapper import FSDPWrapper
 
 
 def link_backward_prefetching(model: FSDPWrapper):
+    # Layer -1 (Last): Prefetched manually in train_loop. Event recorded.
+    # Layer -1 Backward Starts: _unpack_hook -> _materialize -> Waits for Layer 7 event (Success).
+    # Layer -1 Pre-Backward Hook: Triggers prefetch_backward(6). Event for Layer 6 recorded.
+    # Layer -2 Backward Starts: _unpack_hook -> _materialize -> Waits for Layer 6 event (Success).
+
     layers = model.layers
     for i in range(len(layers)):
         # If I am Layer i, I want to trigger prefetch for Layer i-1
@@ -86,12 +91,11 @@ def train_worker(rank, world_size, cfg):
         with_stack=False,
     ) as prof:
         for s in range(cfg.profiler.n_steps):
-            # Memory Snapshot (Pre-step)
             mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
 
             with record_function(f"Step {s}"):
                 # --- A. FORWARD ---
-                # logger.debug(f"Step {s} | Phase: Forward Start")
+                logger.debug(f"Step {s} | Phase: Forward Start")
                 x = torch.randn(B, T, D, device=device)
                 y = model(x)
                 loss = y.sum()
@@ -102,11 +106,11 @@ def train_worker(rank, world_size, cfg):
                     logger.info(f"{s:<6} | {loss_val:<10.4f} | {mem_mb:<10.1f} | {'FWD':<10}")
 
                 # --- B. BACKWARD ---
-                # logger.debug(f"Step {s} | Phase: Backward Start")
+                logger.debug(f"Step {s} | Phase: Backward Start")
 
                 # Prime the pump for Backward: Prefetch last layer manually
                 if cfg.train.overlap:
-                    # logger.trace("Triggering prefetch for LAST layer (Backward Prime)")
+                    logger.debug("Triggering prefetch for LAST layer (Backward Prime)")
                     model.layers[-1].prefetch_backward()
 
                 loss.backward()
@@ -119,7 +123,6 @@ def train_worker(rank, world_size, cfg):
                 optimizer.step()
                 optimizer.zero_grad()
 
-                # Sync for clean profiling steps (Optional, makes trace easier to read)
                 dist.barrier()
 
     # -------------------------------------------------------------------------
